@@ -9,7 +9,7 @@ use std::{
 use tehuti::{
     Duplex,
     engine::EnginePeerDescriptor,
-    meeting::{Meeting, MeetingEngineEvent, MeetingUserEvent},
+    meeting::{MeetingEngineEvent, MeetingInterface, MeetingInterfaceResult},
     peer::{PeerFactory, PeerId},
     protocol::{ProtocolControlFrame, ProtocolPacketFrame},
     third_party::flume::{Sender, unbounded},
@@ -89,12 +89,14 @@ impl MockNetwork {
     pub fn new(interval: Duration) -> Self {
         let (sender, receiver) = unbounded();
         let thread = std::thread::spawn(move || {
-            tracing::event!(
-                target: "tehuti::mock::network",
-                tracing::Level::TRACE,
-                "Mock network started in thread {:?}",
-                std::thread::current().id()
-            );
+            if cfg!(not(miri)) {
+                tracing::event!(
+                    target: "tehuti::mock::network",
+                    tracing::Level::TRACE,
+                    "Mock network started in thread {:?}",
+                    std::thread::current().id()
+                );
+            }
 
             let mut timer = Instant::now();
             let mut nodes = BTreeMap::new();
@@ -107,12 +109,14 @@ impl MockNetwork {
                 for action in receiver.drain() {
                     match action {
                         MockNetworkRequest::Terminate => {
-                            tracing::event!(
-                                target: "tehuti::mock::network",
-                                tracing::Level::TRACE,
-                                "Mock network terminating in thread {:?}",
-                                std::thread::current().id()
-                            );
+                            if cfg!(not(miri)) {
+                                tracing::event!(
+                                    target: "tehuti::mock::network",
+                                    tracing::Level::TRACE,
+                                    "Mock network terminating in thread {:?}",
+                                    std::thread::current().id()
+                                );
+                            }
                             break 'main;
                         }
                         MockNetworkRequest::CreatePort { id, config, reply } => {
@@ -131,12 +135,14 @@ impl MockNetwork {
                                     config,
                                 },
                             );
-                            tracing::event!(
-                                target: "tehuti::mock::network",
-                                tracing::Level::TRACE,
-                                "Mock network port '{}' created",
-                                id
-                            );
+                            if cfg!(not(miri)) {
+                                tracing::event!(
+                                    target: "tehuti::mock::network",
+                                    tracing::Level::TRACE,
+                                    "Mock network port '{}' created",
+                                    id
+                                );
+                            }
                             reply
                                 .send(result)
                                 .map_err(|err| format!("Reply sender error: {err}"))
@@ -144,22 +150,26 @@ impl MockNetwork {
                         }
                         MockNetworkRequest::DestroyPort { id } => {
                             nodes.remove(&id);
-                            tracing::event!(
-                                target: "tehuti::mock::network",
-                                tracing::Level::TRACE,
-                                "Mock network port '{}' destroyed",
-                                id
-                            );
+                            if cfg!(not(miri)) {
+                                tracing::event!(
+                                    target: "tehuti::mock::network",
+                                    tracing::Level::TRACE,
+                                    "Mock network port '{}' destroyed",
+                                    id
+                                );
+                            }
                         }
                         MockNetworkRequest::ReconfigurePort { id, config } => {
                             if let Some(node) = nodes.get_mut(&id) {
                                 node.config = config;
-                                tracing::event!(
-                                    target: "tehuti::mock::network",
-                                    tracing::Level::TRACE,
-                                    "Mock network port '{}' reconfigured",
-                                    id
-                                );
+                                if cfg!(not(miri)) {
+                                    tracing::event!(
+                                        target: "tehuti::mock::network",
+                                        tracing::Level::TRACE,
+                                        "Mock network port '{}' reconfigured",
+                                        id
+                                    );
+                                }
                             }
                         }
                     }
@@ -174,13 +184,15 @@ impl MockNetwork {
                             .try_iter()
                             .filter(|_| !node.config.should_lose_packet())
                             .map(|frame| {
-                                tracing::event!(
-                                    target: "tehuti::mock::network",
-                                    tracing::Level::TRACE,
-                                    "Mock network received control frame {:?} from node '{}'",
-                                    frame,
-                                    id.to_owned()
-                                );
+                                if cfg!(not(miri)) {
+                                    tracing::event!(
+                                        target: "tehuti::mock::network",
+                                        tracing::Level::TRACE,
+                                        "Mock network received control frame {:?} from node '{}'",
+                                        frame,
+                                        id.to_owned()
+                                    );
+                                }
                                 (id.to_owned(), MockNetworkMessage::ControlFrame {
                                     delay: node.config.latency(),
                                     frame,
@@ -192,13 +204,15 @@ impl MockNetwork {
                                     .try_iter()
                                     .filter(|_| !node.config.should_lose_packet())
                                     .map(|frame| {
-                                        tracing::event!(
-                                            target: "tehuti::mock::network",
-                                            tracing::Level::TRACE,
-                                            "Mock network received packet frame {:?} from node '{}'",
-                                            frame,
-                                            id.to_owned()
-                                        );
+                                        if cfg!(not(miri)) {
+                                            tracing::event!(
+                                                target: "tehuti::mock::network",
+                                                tracing::Level::TRACE,
+                                                "Mock network received packet frame {:?} from node '{}'",
+                                                frame,
+                                                id.to_owned()
+                                            );
+                                        }
                                         (id.to_owned(), MockNetworkMessage::PacketFrame {
                                             delay: node.config.latency(),
                                             frame,
@@ -225,14 +239,18 @@ impl MockNetwork {
                             MockNetworkMessage::ControlFrame { mut delay, frame } => {
                                 delay = delay.saturating_sub(delta_time);
                                 if delay <= Duration::ZERO {
-                                    tracing::event!(
-                                        target: "tehuti::mock::network",
-                                        tracing::Level::TRACE,
-                                        "Mock network send control frame {:?} to node '{}'",
-                                        frame,
-                                        id
-                                    );
-                                    if let Err(err) = node.engine_control.sender.send(frame) {
+                                    if cfg!(not(miri)) {
+                                        tracing::event!(
+                                            target: "tehuti::mock::network",
+                                            tracing::Level::TRACE,
+                                            "Mock network send control frame {:?} to node '{}'",
+                                            frame,
+                                            id
+                                        );
+                                    }
+                                    if let Err(err) = node.engine_control.sender.send(frame)
+                                        && !cfg!(not(miri))
+                                    {
                                         tracing::event!(
                                             target: "tehuti::mock::network",
                                             tracing::Level::ERROR,
@@ -249,14 +267,18 @@ impl MockNetwork {
                             MockNetworkMessage::PacketFrame { mut delay, frame } => {
                                 delay = delay.saturating_sub(delta_time);
                                 if delay <= Duration::ZERO {
-                                    tracing::event!(
-                                        target: "tehuti::mock::network",
-                                        tracing::Level::TRACE,
-                                        "Mock network send packet frame {:?} to node '{}'",
-                                        frame,
-                                        id
-                                    );
-                                    if let Err(err) = node.engine_packet.sender.send(frame) {
+                                    if cfg!(not(miri)) {
+                                        tracing::event!(
+                                            target: "tehuti::mock::network",
+                                            tracing::Level::TRACE,
+                                            "Mock network send packet frame {:?} to node '{}'",
+                                            frame,
+                                            id
+                                        );
+                                    }
+                                    if let Err(err) = node.engine_packet.sender.send(frame)
+                                        && !cfg!(not(miri))
+                                    {
                                         tracing::event!(
                                             target: "tehuti::mock::network",
                                             tracing::Level::ERROR,
@@ -278,12 +300,14 @@ impl MockNetwork {
                 std::thread::sleep(interval);
             }
 
-            tracing::event!(
-                target: "tehuti::mock::network",
-                tracing::Level::TRACE,
-                "Mock network stopped in thread {:?}",
-                std::thread::current().id()
-            );
+            if cfg!(not(miri)) {
+                tracing::event!(
+                    target: "tehuti::mock::network",
+                    tracing::Level::TRACE,
+                    "Mock network stopped in thread {:?}",
+                    std::thread::current().id()
+                );
+            }
         });
         MockNetwork {
             requests: sender,
@@ -341,17 +365,6 @@ pub struct MockNetworkPort {
     pub network_packet: Duplex<ProtocolPacketFrame>,
 }
 
-pub struct MockMeetingCommunication {
-    id: usize,
-    pub user_event: Duplex<MeetingUserEvent>,
-}
-
-impl MockMeetingCommunication {
-    pub fn id(&self) -> usize {
-        self.id
-    }
-}
-
 struct MockMeeting {
     terminate: Sender<()>,
     thread: Option<JoinHandle<()>>,
@@ -372,36 +385,45 @@ impl MockMeeting {
         factory: Arc<PeerFactory>,
         port: MockNetworkPort,
         interval: Duration,
-    ) -> (Self, Duplex<MeetingUserEvent>) {
-        let (inside_engine, outside_engine) = Duplex::crossing_unbounded();
-        let (inside_user, outside_user) = Duplex::crossing_unbounded();
+    ) -> (Self, MeetingInterface) {
         let (termination_sender, termination_receiver) = unbounded();
+        let (reply_sender, reply_receiver) = unbounded();
         let thread = std::thread::spawn(move || {
-            tracing::event!(
-                target: "tehuti::mock::meeting",
-                tracing::Level::TRACE,
-                "Mock meeting {} started in thread {:?}",
-                id,
-                std::thread::current().id()
-            );
+            if cfg!(not(miri)) {
+                tracing::event!(
+                    target: "tehuti::mock::meeting",
+                    tracing::Level::TRACE,
+                    "Mock meeting {} started in thread {:?}",
+                    id,
+                    std::thread::current().id()
+                );
+            }
 
-            let mut meeting = Meeting::new(
+            let MeetingInterfaceResult {
+                mut meeting,
+                interface,
+                engine_event: outside_engine,
+            } = MeetingInterface::make(
                 factory,
-                inside_engine,
-                inside_user,
                 format!("{}-{:?}", id, std::thread::current().id()),
             );
+            reply_sender
+                .send(interface)
+                .map_err(|err| format!("Machine reply sender error: {err}"))
+                .unwrap();
             let mut peers = BTreeMap::<PeerId, EnginePeerDescriptor>::new();
 
             loop {
                 if termination_receiver.drain().next().is_some() {
-                    tracing::event!(
-                        target: "tehuti::mock::meeting",
-                        tracing::Level::TRACE,
-                        "Mock meeting {} terminating in thread {:?}",
-                        id,
-                        std::thread::current().id()
-                    );
+                    if cfg!(not(miri)) {
+                        tracing::event!(
+                            target: "tehuti::mock::meeting",
+                            tracing::Level::TRACE,
+                            "Mock meeting {} terminating in thread {:?}",
+                            id,
+                            std::thread::current().id()
+                        );
+                    }
                     break;
                 }
 
@@ -426,14 +448,16 @@ impl MockMeeting {
                                 .unwrap();
                         }
                         _ => {
-                            tracing::event!(
-                                target: "tehuti::mock::meeting",
-                                tracing::Level::WARN,
-                                "Mock meeting {} got unhandled control frame: {:?} in thread {:?}",
-                                id,
-                                frame,
-                                std::thread::current().id()
-                            );
+                            if cfg!(not(miri)) {
+                                tracing::event!(
+                                    target: "tehuti::mock::meeting",
+                                    tracing::Level::WARN,
+                                    "Mock meeting {} got unhandled control frame: {:?} in thread {:?}",
+                                    id,
+                                    frame,
+                                    std::thread::current().id()
+                                );
+                            }
                         }
                     }
                 }
@@ -446,7 +470,7 @@ impl MockMeeting {
                                 .send(frame.data)
                                 .map_err(|err| format!("Machine packet sender error: {err}"))
                                 .unwrap();
-                        } else {
+                        } else if cfg!(not(miri)) {
                             tracing::event!(
                                 target: "tehuti::mock::meeting",
                                 tracing::Level::WARN,
@@ -457,7 +481,7 @@ impl MockMeeting {
                                 std::thread::current().id()
                             );
                         }
-                    } else {
+                    } else if cfg!(not(miri)) {
                         tracing::event!(
                             target: "tehuti::mock::meeting",
                             tracing::Level::WARN,
@@ -486,27 +510,31 @@ impl MockMeeting {
                 }
 
                 if let Err(err) = meeting.pump_all() {
-                    tracing::event!(
-                        target: "tehuti::mock::meeting",
-                        tracing::Level::ERROR,
-                        "Mock meeting {} encountered error: {} in thread {:?}. Terminating",
-                        id,
-                        err,
-                        std::thread::current().id()
-                    );
+                    if cfg!(not(miri)) {
+                        tracing::event!(
+                            target: "tehuti::mock::meeting",
+                            tracing::Level::ERROR,
+                            "Mock meeting {} encountered error: {} in thread {:?}. Terminating",
+                            id,
+                            err,
+                            std::thread::current().id()
+                        );
+                    }
                     break;
                 }
 
                 for event in outside_engine.receiver.drain() {
                     match event {
                         MeetingEngineEvent::MeetingDestroyed => {
-                            tracing::event!(
-                                target: "tehuti::mock::meeting",
-                                tracing::Level::TRACE,
-                                "Mock meeting {} terminating in thread {:?}",
-                                id,
-                                std::thread::current().id()
-                            );
+                            if cfg!(not(miri)) {
+                                tracing::event!(
+                                    target: "tehuti::mock::meeting",
+                                    tracing::Level::TRACE,
+                                    "Mock meeting {} terminating in thread {:?}",
+                                    id,
+                                    std::thread::current().id()
+                                );
+                            }
                             break;
                         }
                         MeetingEngineEvent::PeerCreated(descriptor) => {
@@ -523,16 +551,18 @@ impl MockMeeting {
                                         })
                                         .unwrap();
                                 }
-                                tracing::event!(
-                                    target: "tehuti::mock::meeting",
-                                    tracing::Level::TRACE,
-                                    "Mock meeting {} created peer {:?} in thread {:?}",
-                                    id,
-                                    descriptor.info.peer_id,
-                                    std::thread::current().id()
-                                );
+                                if cfg!(not(miri)) {
+                                    tracing::event!(
+                                        target: "tehuti::mock::meeting",
+                                        tracing::Level::TRACE,
+                                        "Mock meeting {} created peer {:?} in thread {:?}",
+                                        id,
+                                        descriptor.info.peer_id,
+                                        std::thread::current().id()
+                                    );
+                                }
                                 entry.insert(descriptor);
-                            } else {
+                            } else if cfg!(not(miri)) {
                                 tracing::event!(
                                     target: "tehuti::mock::meeting",
                                     tracing::Level::WARN,
@@ -550,16 +580,18 @@ impl MockMeeting {
                                     .send(ProtocolControlFrame::DestroyPeer(peer_id))
                                     .map_err(|err| format!("Network control sender error: {err}"))
                                     .unwrap();
-                                tracing::event!(
-                                    target: "tehuti::mock::meeting",
-                                    tracing::Level::TRACE,
-                                    "Mock meeting {} destroyed peer {:?} in thread {:?}",
-                                    id,
-                                    peer_id,
-                                    std::thread::current().id()
-                                );
+                                if cfg!(not(miri)) {
+                                    tracing::event!(
+                                        target: "tehuti::mock::meeting",
+                                        tracing::Level::TRACE,
+                                        "Mock meeting {} destroyed peer {:?} in thread {:?}",
+                                        id,
+                                        peer_id,
+                                        std::thread::current().id()
+                                    );
+                                }
                                 peers.remove(&peer_id);
-                            } else {
+                            } else if cfg!(not(miri)) {
                                 tracing::event!(
                                     target: "tehuti::mock::meeting",
                                     tracing::Level::WARN,
@@ -571,14 +603,16 @@ impl MockMeeting {
                             }
                         }
                         event => {
-                            tracing::event!(
-                                target: "tehuti::mock::meeting",
-                                tracing::Level::WARN,
-                                "Mock meeting {} got unhandled engine event: {:?} in thread {:?}",
-                                id,
-                                event,
-                                std::thread::current().id()
-                            );
+                            if cfg!(not(miri)) {
+                                tracing::event!(
+                                    target: "tehuti::mock::meeting",
+                                    tracing::Level::WARN,
+                                    "Mock meeting {} got unhandled engine event: {:?} in thread {:?}",
+                                    id,
+                                    event,
+                                    std::thread::current().id()
+                                );
+                            }
                         }
                     }
                 }
@@ -586,20 +620,26 @@ impl MockMeeting {
                 std::thread::sleep(interval);
             }
 
-            tracing::event!(
-                target: "tehuti::mock::meeting",
-                tracing::Level::TRACE,
-                "Mock meeting {} stopped in thread {:?}",
-                id,
-                std::thread::current().id()
-            );
+            if cfg!(not(miri)) {
+                tracing::event!(
+                    target: "tehuti::mock::meeting",
+                    tracing::Level::TRACE,
+                    "Mock meeting {} stopped in thread {:?}",
+                    id,
+                    std::thread::current().id()
+                );
+            }
         });
+
         (
             Self {
                 terminate: termination_sender,
                 thread: Some(thread),
             },
-            outside_user,
+            reply_receiver
+                .recv()
+                .map_err(|error| format!("Reply receiver error: {error}"))
+                .unwrap(),
         )
     }
 }
@@ -609,7 +649,7 @@ enum MockMachineRequest {
     StartMeeting {
         factory: Arc<PeerFactory>,
         port: MockNetworkPort,
-        reply: Sender<MockMeetingCommunication>,
+        reply: Sender<MeetingInterface>,
     },
     StopMeeting {
         id: usize,
@@ -640,12 +680,14 @@ impl MockMachine {
     pub fn new(interval: Duration) -> Self {
         let (sender, receiver) = unbounded();
         let thread = std::thread::spawn(move || {
-            tracing::event!(
-                target: "tehuti::mock::machine",
-                tracing::Level::TRACE,
-                "Mock machine started in thread {:?}",
-                std::thread::current().id()
-            );
+            if cfg!(not(miri)) {
+                tracing::event!(
+                    target: "tehuti::mock::machine",
+                    tracing::Level::TRACE,
+                    "Mock machine started in thread {:?}",
+                    std::thread::current().id()
+                );
+            }
 
             let mut id_generator = 0;
             let mut meetings = BTreeMap::new();
@@ -654,12 +696,14 @@ impl MockMachine {
                 for action in receiver.drain() {
                     match action {
                         MockMachineRequest::Terminate => {
-                            tracing::event!(
-                                target: "tehuti::mock::machine",
-                                tracing::Level::TRACE,
-                                "Mock machine terminating in thread {:?}",
-                                std::thread::current().id()
-                            );
+                            if cfg!(not(miri)) {
+                                tracing::event!(
+                                    target: "tehuti::mock::machine",
+                                    tracing::Level::TRACE,
+                                    "Mock machine terminating in thread {:?}",
+                                    std::thread::current().id()
+                                );
+                            }
                             break 'main;
                         }
                         MockMachineRequest::StartMeeting {
@@ -668,14 +712,11 @@ impl MockMachine {
                             reply,
                         } => {
                             id_generator += 1;
-                            let (meeting, outside_user) =
+                            let (meeting, interface) =
                                 MockMeeting::new(id_generator, factory, port, interval);
                             meetings.insert(id_generator, meeting);
                             reply
-                                .send(MockMeetingCommunication {
-                                    id: id_generator,
-                                    user_event: outside_user,
-                                })
+                                .send(interface)
                                 .map_err(|err| format!("Machine reply sender error: {err}"))
                                 .unwrap();
                         }
@@ -688,12 +729,14 @@ impl MockMachine {
                 std::thread::sleep(interval);
             }
 
-            tracing::event!(
-                target: "tehuti::mock::machine",
-                tracing::Level::TRACE,
-                "Mock machine stopped in thread {:?}",
-                std::thread::current().id()
-            );
+            if cfg!(not(miri)) {
+                tracing::event!(
+                    target: "tehuti::mock::machine",
+                    tracing::Level::TRACE,
+                    "Mock machine stopped in thread {:?}",
+                    std::thread::current().id()
+                );
+            }
         });
         MockMachine {
             request: sender,
@@ -705,7 +748,7 @@ impl MockMachine {
         &self,
         factory: Arc<PeerFactory>,
         port: MockNetworkPort,
-    ) -> Result<MockMeetingCommunication, Box<dyn Error>> {
+    ) -> Result<MeetingInterface, Box<dyn Error>> {
         let (reply_sender, reply_receiver) = unbounded();
         self.request
             .send(MockMachineRequest::StartMeeting {
@@ -776,23 +819,44 @@ macro_rules! mock_recv_matching {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{error::Error, sync::Arc};
+    use std::{
+        error::Error,
+        io::{Read, Write},
+        sync::Arc,
+    };
     use tehuti::{
         channel::{ChannelId, ChannelMode},
-        packet::PacketSerializer,
-        peer::{PeerFactory, PeerId, PeerRoleId},
+        codec::Codec,
+        meeting::MeetingUserEvent,
+        peer::{PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
+        third_party::flume::Receiver,
     };
 
-    struct StringPacketSerializer;
+    struct StringCodec;
 
-    impl PacketSerializer<String> for StringPacketSerializer {
-        fn encode(&mut self, message: &String, buffer: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
-            buffer.extend_from_slice(message.as_bytes());
+    impl Codec<String> for StringCodec {
+        fn encode(message: &String, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+            buffer.write_all(message.as_bytes())?;
             Ok(())
         }
 
-        fn decode(&mut self, buffer: &[u8]) -> Result<String, Box<dyn Error>> {
-            Ok(String::from_utf8(buffer.to_vec())?)
+        fn decode(buffer: &mut dyn Read) -> Result<String, Box<dyn Error>> {
+            let mut vec = Vec::new();
+            buffer.read_to_end(&mut vec)?;
+            Ok(String::from_utf8(vec)?)
+        }
+    }
+
+    struct Chatter {
+        pub sender: Sender<String>,
+        pub receiver: Receiver<String>,
+    }
+
+    impl TypedPeer for Chatter {
+        fn into_typed(mut destructurer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
+            let sender = destructurer.write::<String>(ChannelId::new(0))?;
+            let receiver = destructurer.read::<String>(ChannelId::new(0))?;
+            Ok(Self { sender, receiver })
         }
     }
 
@@ -805,17 +869,20 @@ mod tests {
         // networking libraries, by allowing users to define their own roles.
         // For example Authority role might read and write on all channels,
         // while Client role might only read most and write on few channels.
+        // Binding allows to define optional capacity for channels - this makes
+        // them bounded, so when new message arrives and there is no more space,
+        // oldest message is dropped.
         let factory = Arc::new(PeerFactory::default().with(PeerRoleId::new(0), |builder| {
             builder
-                .bind_read::<String>(
+                .bind_read::<StringCodec, String>(
                     ChannelId::new(0),
                     ChannelMode::ReliableOrdered,
-                    StringPacketSerializer,
+                    None,
                 )
-                .bind_write::<String>(
+                .bind_write::<StringCodec, String>(
                     ChannelId::new(0),
                     ChannelMode::ReliableOrdered,
-                    StringPacketSerializer,
+                    None,
                 )
         }));
 
@@ -835,7 +902,6 @@ mod tests {
 
         // Create peers in connected meeting, replicated on all machines.
         meeting_a
-            .user_event
             .sender
             .send(MeetingUserEvent::PeerCreate(
                 PeerId::new(0),
@@ -845,24 +911,30 @@ mod tests {
 
         // Gather created peers on both machines.
         let peer_a = mock_recv_matching!(
-            meeting_a.user_event.receiver,
+            meeting_a.receiver,
             Duration::from_secs(1),
             MeetingUserEvent::PeerAdded(peer) => peer
-        );
+        )
+        .into_typed::<Chatter>()
+        .unwrap();
         let peer_b = mock_recv_matching!(
-            meeting_b.user_event.receiver,
+            meeting_b.receiver,
             Duration::from_secs(1),
             MeetingUserEvent::PeerAdded(peer) => peer
-        );
+        )
+        .into_typed::<Chatter>()
+        .unwrap();
 
         // Send message from peer on machine A to peer on machine B.
         peer_a
-            .send(ChannelId::new(0), "Hello from machine A".to_owned())
+            .sender
+            .send("Hello from machine A".to_owned())
             .unwrap();
 
         // Receive message on peer on machine B.
         let msg = peer_b
-            .recv_timeout::<String>(ChannelId::new(0), Duration::from_secs(1))
+            .receiver
+            .recv_timeout(Duration::from_secs(1))
             .unwrap();
         assert_eq!(&msg, "Hello from machine A");
 

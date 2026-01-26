@@ -1,6 +1,6 @@
 [package]
 name = "tehuti"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
 description = "Modular communication system for game development."
@@ -10,10 +10,11 @@ repository = "https://github.com/PsichiX/tehuti"
 documentation = "https://docs.rs/tehuti"
 readme = "../../README.md"
 
-[features]
-default = ["tracing"]
-tracing = ["dep:tracing"]
-
 [dependencies]
 flume = { version = "0.12", default-features = false, features = ["async"] }
-tracing = { version = "0.1", optional = true }
+tracing = "0.1"
+serde = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }

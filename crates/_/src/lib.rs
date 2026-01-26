@@ -30,11 +30,12 @@
 //!    and delivered to all machines peer(s).
 
 pub mod channel;
+pub mod codec;
 pub mod engine;
 pub mod meeting;
-pub mod packet;
 pub mod peer;
 pub mod protocol;
+pub mod replication;
 
 pub mod third_party {
     pub use flume;

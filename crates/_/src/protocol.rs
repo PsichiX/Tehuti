@@ -35,18 +35,18 @@ impl ProtocolControlFrame {
     }
 
     pub fn read(stream: &mut dyn Read) -> Result<ProtocolControlFrame> {
-        let mut frame_type = [0u8; 1];
+        let mut frame_type = [0u8; std::mem::size_of::<u8>()];
         stream.read_exact(&mut frame_type)?;
         match frame_type[0] {
             0 => {
-                let mut timestamp_bytes = [0u8; 8];
+                let mut timestamp_bytes = [0u8; std::mem::size_of::<u64>()];
                 stream.read_exact(&mut timestamp_bytes)?;
                 let timestamp = u64::from_be_bytes(timestamp_bytes);
                 Ok(ProtocolControlFrame::Heartbeat { timestamp })
             }
             1 => {
-                let mut peer_id_bytes = [0u8; 8];
-                let mut role_id_bytes = [0u8; 8];
+                let mut peer_id_bytes = [0u8; std::mem::size_of::<u64>()];
+                let mut role_id_bytes = [0u8; std::mem::size_of::<u64>()];
                 stream.read_exact(&mut peer_id_bytes)?;
                 stream.read_exact(&mut role_id_bytes)?;
                 let peer_id = PeerId::new(u64::from_be_bytes(peer_id_bytes));
@@ -54,7 +54,7 @@ impl ProtocolControlFrame {
                 Ok(ProtocolControlFrame::CreatePeer(peer_id, role_id))
             }
             2 => {
-                let mut peer_id_bytes = [0u8; 8];
+                let mut peer_id_bytes = [0u8; std::mem::size_of::<u64>()];
                 stream.read_exact(&mut peer_id_bytes)?;
                 let peer_id = PeerId::new(u64::from_be_bytes(peer_id_bytes));
                 Ok(ProtocolControlFrame::DestroyPeer(peer_id))
@@ -87,9 +87,9 @@ impl ProtocolPacketFrame {
     }
 
     pub fn read(stream: &mut dyn Read) -> Result<ProtocolPacketFrame> {
-        let mut peer_id_bytes = [0u8; 8];
-        let mut channel_id_bytes = [0u8; 8];
-        let mut data_len_bytes = [0u8; 4];
+        let mut peer_id_bytes = [0u8; std::mem::size_of::<u64>()];
+        let mut channel_id_bytes = [0u8; std::mem::size_of::<u64>()];
+        let mut data_len_bytes = [0u8; std::mem::size_of::<u32>()];
         stream.read_exact(&mut peer_id_bytes)?;
         stream.read_exact(&mut channel_id_bytes)?;
         stream.read_exact(&mut data_len_bytes)?;

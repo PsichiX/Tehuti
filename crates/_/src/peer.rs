@@ -1,10 +1,10 @@
 use crate::{
     channel::{Channel, ChannelId, ChannelMode},
+    codec::Codec,
     engine::{EnginePacketReceiver, EnginePacketSender, EnginePeerDescriptor},
     meeting::MeetingUserEvent,
-    packet::PacketSerializer,
 };
-use flume::{Receiver, Sender, unbounded};
+use flume::{Receiver, Sender, bounded, unbounded};
 use std::{
     any::{Any, TypeId},
     collections::BTreeMap,
@@ -96,6 +96,14 @@ impl Peer {
             senders: Default::default(),
             meeting_sender,
         }
+    }
+
+    pub fn destructure(self) -> PeerDestructurer {
+        PeerDestructurer::new(self)
+    }
+
+    pub fn into_typed<T: TypedPeer>(self) -> Result<T, Box<dyn Error>> {
+        T::into_typed(self.destructure())
     }
 
     pub fn info(&self) -> &PeerInfo {
@@ -281,15 +289,23 @@ impl PeerBuilder {
         }
     }
 
-    pub fn bind_read<Message: Send + 'static>(
+    pub fn bind_read<C: Codec<Message> + Send + 'static, Message: Send + 'static>(
         mut self,
         channel_id: ChannelId,
         mode: ChannelMode,
-        serializer: impl PacketSerializer<Message> + Send + 'static,
+        capacity: Option<usize>,
     ) -> Self {
-        let (packet_tx, packet_rx) = unbounded();
-        let (message_tx, message_rx) = unbounded();
-        let channel = Channel::read(packet_rx, message_tx, serializer);
+        let (packet_tx, packet_rx) = if let Some(capacity) = capacity {
+            bounded(capacity)
+        } else {
+            unbounded()
+        };
+        let (message_tx, message_rx) = if let Some(capacity) = capacity {
+            bounded(capacity)
+        } else {
+            unbounded()
+        };
+        let channel = Channel::read::<C, Message>(packet_rx, message_tx);
         self.read_channels
             .insert(channel_id, (mode, channel, packet_tx));
         self.peer
@@ -298,15 +314,23 @@ impl PeerBuilder {
         self
     }
 
-    pub fn bind_write<Message: Send + 'static>(
+    pub fn bind_write<C: Codec<Message> + Send + 'static, Message: Send + 'static>(
         mut self,
         channel_id: ChannelId,
         mode: ChannelMode,
-        serializer: impl PacketSerializer<Message> + Send + 'static,
+        capacity: Option<usize>,
     ) -> Self {
-        let (packet_tx, packet_rx) = unbounded();
-        let (message_tx, message_rx) = unbounded();
-        let channel = Channel::write(packet_tx, message_rx, serializer);
+        let (packet_tx, packet_rx) = if let Some(capacity) = capacity {
+            bounded(capacity)
+        } else {
+            unbounded()
+        };
+        let (message_tx, message_rx) = if let Some(capacity) = capacity {
+            bounded(capacity)
+        } else {
+            unbounded()
+        };
+        let channel = Channel::write::<C, Message>(packet_tx, message_rx);
         self.write_channels
             .insert(channel_id, (mode, channel, packet_rx));
         self.peer
@@ -352,6 +376,70 @@ impl PeerBuilder {
     }
 }
 
+pub trait TypedPeer {
+    fn into_typed(peer: PeerDestructurer) -> Result<Self, Box<dyn Error>>
+    where
+        Self: Sized;
+}
+
+pub struct PeerDestructurer {
+    peer: Peer,
+}
+
+impl PeerDestructurer {
+    pub fn new(peer: Peer) -> Self {
+        Self { peer }
+    }
+
+    pub fn read<Message: Send + 'static>(
+        &mut self,
+        channel_id: ChannelId,
+    ) -> Result<Receiver<Message>, Box<dyn Error>> {
+        let receiver = self
+            .peer
+            .receivers
+            .remove(&channel_id)
+            .ok_or_else(|| {
+                format!(
+                    "Peer {:?} has no message receiver with id {:?}",
+                    self.peer.info.peer_id, channel_id
+                )
+            })?
+            .downcast::<Receiver<Message>>()
+            .map_err(|_| {
+                format!(
+                    "Message receiver {:?} for Peer {:?} has different message type",
+                    channel_id, self.peer.info.peer_id
+                )
+            })?;
+        Ok(*receiver)
+    }
+
+    pub fn write<Message: Send + 'static>(
+        &mut self,
+        channel_id: ChannelId,
+    ) -> Result<Sender<Message>, Box<dyn Error>> {
+        let sender = self
+            .peer
+            .senders
+            .remove(&channel_id)
+            .ok_or_else(|| {
+                format!(
+                    "Peer {:?} has no message sender with id {:?}",
+                    self.peer.info.peer_id, channel_id
+                )
+            })?
+            .downcast::<Sender<Message>>()
+            .map_err(|_| {
+                format!(
+                    "Message sender {:?} for Peer {:?} has different message type",
+                    channel_id, self.peer.info.peer_id
+                )
+            })?;
+        Ok(*sender)
+    }
+}
+
 #[derive(Default)]
 pub struct PeerFactory {
     registry: BTreeMap<PeerRoleId, Arc<dyn Fn(PeerBuilder) -> PeerBuilder + Send + Sync>>,
@@ -394,20 +482,9 @@ impl PeerFactory {
 
 #[cfg(test)]
 mod tests {
+    use crate::codec::tests::PostcardCodec;
+
     use super::*;
-
-    struct TestPacketSerializer;
-
-    impl PacketSerializer<u8> for TestPacketSerializer {
-        fn encode(&mut self, message: &u8, buffer: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
-            buffer.push(*message);
-            Ok(())
-        }
-
-        fn decode(&mut self, buffer: &[u8]) -> Result<u8, Box<dyn Error>> {
-            Ok(buffer[0])
-        }
-    }
 
     #[test]
     fn test_async() {
@@ -423,15 +500,15 @@ mod tests {
     fn test_peer() {
         let factory = PeerFactory::default().with(PeerRoleId::new(0), |builder| {
             builder
-                .bind_read::<u8>(
+                .bind_read::<PostcardCodec<u8>, u8>(
                     ChannelId::new(0),
                     ChannelMode::ReliableOrdered,
-                    TestPacketSerializer,
+                    None,
                 )
-                .bind_write::<u8>(
+                .bind_write::<PostcardCodec<u8>, u8>(
                     ChannelId::new(0),
                     ChannelMode::ReliableOrdered,
-                    TestPacketSerializer,
+                    None,
                 )
         });
         let (meeting_tx, _) = unbounded();
@@ -461,11 +538,11 @@ mod tests {
             .receiver
             .try_recv()
             .unwrap();
-        let message = TestPacketSerializer.decode(&packet).unwrap();
+        let message = PostcardCodec::<u8>::decode(&mut packet.as_slice()).unwrap();
         assert_eq!(message, 42u8);
 
         let mut packet = Vec::new();
-        TestPacketSerializer.encode(&100, &mut packet).unwrap();
+        PostcardCodec::<u8>::encode(&100, &mut packet).unwrap();
         descriptor
             .packet_senders
             .get(&ChannelId::new(0))

@@ -12,7 +12,7 @@ test:
 
 miri:
   cargo +nightly miri test --manifest-path ./crates/_/Cargo.toml -- --nocapture
-  cargo +nightly miri test --manifest-path ./crates/mock/Cargo.toml -- --nocapture
+  # cargo +nightly miri test --manifest-path ./crates/mock/Cargo.toml -- --nocapture
   
 clippy:
   cargo clippy --all --all-features

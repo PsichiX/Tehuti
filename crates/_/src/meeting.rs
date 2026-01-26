@@ -7,6 +7,7 @@ use crate::{
 use std::{
     collections::BTreeMap,
     error::Error,
+    ops::Deref,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -14,18 +15,27 @@ use std::{
 
 #[derive(Debug)]
 pub enum MeetingEngineEvent {
+    /// Notification that the meeting has been destroyed.
     MeetingDestroyed,
+    /// Notification that a peer has been created.
     PeerCreated(EnginePeerDescriptor),
+    /// Notification that a peer has been destroyed.
     PeerDestroyed(PeerId),
+    /// Notification that a peer has joined.
     PeerJoined(PeerId, PeerRoleId),
+    /// Notification that a peer has left.
     PeerLeft(PeerId),
 }
 
 #[derive(Debug)]
 pub enum MeetingUserEvent {
+    /// Request to create a peer with the given ID and role.
     PeerCreate(PeerId, PeerRoleId),
+    /// Request to destroy the peer with the given ID.
     PeerDestroy(PeerId),
+    /// Response that a peer has been added.
     PeerAdded(Peer),
+    /// Response that a peer has been removed.
     PeerRemoved(PeerId),
 }
 
@@ -45,13 +55,14 @@ impl Drop for Meeting {
             .engine_event
             .sender
             .send(MeetingEngineEvent::MeetingDestroyed);
-        #[cfg(feature = "tracing")]
-        tracing::event!(
-            target: "tehuti::meeting",
-            tracing::Level::TRACE,
-            "Meeting {} closed",
-            self.name
-        );
+        if cfg!(not(miri)) {
+            tracing::event!(
+                target: "tehuti::meeting",
+                tracing::Level::TRACE,
+                "Meeting {} closed",
+                self.name
+            );
+        }
     }
 }
 
@@ -63,13 +74,14 @@ impl Meeting {
         name: impl ToString,
     ) -> Self {
         let name = name.to_string();
-        #[cfg(feature = "tracing")]
-        tracing::event!(
-            target: "tehuti::meeting",
-            tracing::Level::TRACE,
-            "Meeting {} opened",
-            name
-        );
+        if cfg!(not(miri)) {
+            tracing::event!(
+                target: "tehuti::meeting",
+                tracing::Level::TRACE,
+                "Meeting {} opened",
+                name
+            );
+        }
         Self {
             factory,
             engine_event,
@@ -77,6 +89,10 @@ impl Meeting {
             peers: Default::default(),
             name,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn pump(&mut self) -> Result<bool, Box<dyn Error>> {
@@ -116,14 +132,15 @@ impl Meeting {
     }
 
     fn handle_engine_event(&mut self, event: MeetingEngineEvent) -> Result<(), Box<dyn Error>> {
-        #[cfg(feature = "tracing")]
-        tracing::event!(
-            target: "tehuti::meeting",
-            tracing::Level::TRACE,
-            "Meeting {} handle engine event: {:?}",
-            self.name,
-            event
-        );
+        if cfg!(not(miri)) {
+            tracing::event!(
+                target: "tehuti::meeting",
+                tracing::Level::TRACE,
+                "Meeting {} handle engine event: {:?}",
+                self.name,
+                event
+            );
+        }
         match event {
             MeetingEngineEvent::PeerJoined(peer_id, role_id) => {
                 let PeerBuildResult {
@@ -165,14 +182,15 @@ impl Meeting {
     }
 
     fn handle_user_event(&mut self, event: MeetingUserEvent) -> Result<(), Box<dyn Error>> {
-        #[cfg(feature = "tracing")]
-        tracing::event!(
-            target: "tehuti::meeting",
-            tracing::Level::TRACE,
-            "Meeting {} handle user event: {:?}",
-            self.name,
-            event
-        );
+        if cfg!(not(miri)) {
+            tracing::event!(
+                target: "tehuti::meeting",
+                tracing::Level::TRACE,
+                "Meeting {} handle user event: {:?}",
+                self.name,
+                event
+            );
+        }
         match event {
             MeetingUserEvent::PeerCreate(peer_id, role_id) => {
                 let PeerBuildResult {
@@ -217,31 +235,54 @@ impl Meeting {
 impl Future for Meeting {
     type Output = Result<(), Box<dyn Error>>;
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.pump() {
             Ok(true) => Poll::Ready(Ok(())),
-            Ok(false) => Poll::Pending,
+            Ok(false) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
+    }
+}
+
+pub struct MeetingInterfaceResult {
+    pub meeting: Meeting,
+    pub interface: MeetingInterface,
+    pub engine_event: Duplex<MeetingEngineEvent>,
+}
+
+pub struct MeetingInterface {
+    user_event: Duplex<MeetingUserEvent>,
+}
+
+impl MeetingInterface {
+    pub fn make(factory: Arc<PeerFactory>, name: impl ToString) -> MeetingInterfaceResult {
+        let (inside_engine, outside_engine) = Duplex::crossing_unbounded();
+        let (inside_user, outside_user) = Duplex::crossing_unbounded();
+        let meeting = Meeting::new(factory, inside_engine, inside_user, name);
+        MeetingInterfaceResult {
+            meeting,
+            interface: Self {
+                user_event: outside_user,
+            },
+            engine_event: outside_engine,
+        }
+    }
+}
+
+impl Deref for MeetingInterface {
+    type Target = Duplex<MeetingUserEvent>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.user_event
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // struct TestPacketSerializer;
-
-    // impl PacketSerializer<u8> for TestPacketSerializer {
-    //     fn encode(&mut self, message: &u8, buffer: &mut Vec<u8>) -> Result<(), Box<dyn Error>> {
-    //         buffer.push(*message);
-    //         Ok(())
-    //     }
-
-    //     fn decode(&mut self, buffer: &[u8]) -> Result<u8, Box<dyn Error>> {
-    //         Ok(buffer[0])
-    //     }
-    // }
 
     #[test]
     fn test_async() {
@@ -250,27 +291,5 @@ mod tests {
         is_send::<MeetingEngineEvent>();
         is_send::<MeetingUserEvent>();
         is_send::<Meeting>();
-    }
-
-    // TODO: reimplement properly!
-    #[test]
-    fn test_meeting() {
-        // let factory = Arc::new(PeerFactory::default().with(PeerRoleId::new(0), |builder| {
-        //     builder
-        //         .bind_read::<u8>(
-        //             ChannelId::new(0),
-        //             ChannelMode::ReliableOrdered,
-        //             TestPacketSerializer,
-        //         )
-        //         .bind_write::<u8>(
-        //             ChannelId::new(0),
-        //             ChannelMode::ReliableOrdered,
-        //             TestPacketSerializer,
-        //         )
-        // }));
-
-        // let mut meeting = Meeting::new(factory, Duplex::unbounded(), Duplex::unbounded());
-
-        // assert!(meeting.drain().is_ok());
     }
 }

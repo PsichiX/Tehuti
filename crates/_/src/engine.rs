@@ -1,22 +1,18 @@
 use crate::{
-    Duplex,
     channel::{ChannelId, ChannelMode},
-    meeting::{Meeting, MeetingUserEvent},
+    meeting::{Meeting, MeetingInterface},
     peer::{PeerFactory, PeerInfo},
 };
 use flume::{Receiver, Sender};
 use std::{collections::BTreeMap, error::Error, sync::Arc};
 
 pub trait EngineMeeting<MeetingConfig> {
-    type MeetingResult;
-
     fn request_meeting(
         &mut self,
         factory: Arc<PeerFactory>,
         config: MeetingConfig,
-        user_event: Duplex<MeetingUserEvent>,
-        reply: Sender<Result<Meeting, Box<dyn Error + Send>>>,
-    ) -> Result<Self::MeetingResult, Box<dyn Error>>;
+        reply_sender: Sender<Result<(Meeting, MeetingInterface), Box<dyn Error + Send>>>,
+    ) -> Result<(), Box<dyn Error>>;
 }
 
 #[derive(Debug)]

@@ -1,4 +1,4 @@
-use crate::{Duplex, packet::PacketSerializer};
+use crate::{Duplex, codec::Codec};
 use flume::{Receiver, Sender};
 use std::{
     any::{Any, TypeId},
@@ -63,21 +63,18 @@ pub struct Channel {
 }
 
 impl Channel {
-    pub fn read<Message: Send + 'static>(
+    pub fn read<C: Codec<Message>, Message: Send + 'static>(
         packet_receiver: Receiver<Vec<u8>>,
         message_sender: Sender<Message>,
-        serializer: impl PacketSerializer<Message> + Send + 'static,
     ) -> Self {
         struct State<Message: Send + 'static> {
             packet_receiver: Receiver<Vec<u8>>,
             message_sender: Sender<Message>,
-            serializer: Box<dyn PacketSerializer<Message> + Send>,
         }
 
         let state_pump = Arc::new(Mutex::new(State {
             packet_receiver,
             message_sender,
-            serializer: Box::new(serializer),
         })) as Arc<Mutex<dyn Any + Send>>;
         let state_pump_all = state_pump.clone();
         let pump = Box::new(move || -> Result<bool, Box<dyn Error>> {
@@ -88,7 +85,7 @@ impl Channel {
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
             if let Ok(packet) = state.packet_receiver.try_recv() {
-                let message = state.serializer.decode(&packet)?;
+                let message = C::decode(&mut packet.as_slice())?;
                 state
                     .message_sender
                     .send(message)
@@ -107,7 +104,7 @@ impl Channel {
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
             for packet in state.packet_receiver.drain() {
-                let message = state.serializer.decode(&packet)?;
+                let message = C::decode(&mut packet.as_slice())?;
                 state
                     .message_sender
                     .send(message)
@@ -123,21 +120,18 @@ impl Channel {
         }
     }
 
-    pub fn write<Message: Send + 'static>(
+    pub fn write<C: Codec<Message>, Message: Send + 'static>(
         packet_sender: Sender<Vec<u8>>,
         message_receiver: Receiver<Message>,
-        serializer: impl PacketSerializer<Message> + Send + 'static,
     ) -> Self {
         struct State<Message: Send + 'static> {
             packet_sender: Sender<Vec<u8>>,
             message_receiver: Receiver<Message>,
-            serializer: Box<dyn PacketSerializer<Message> + Send>,
         }
 
         let state_pump = Arc::new(Mutex::new(State {
             packet_sender,
             message_receiver,
-            serializer: Box::new(serializer),
         })) as Arc<Mutex<dyn Any + Send>>;
         let state_pump_all = state_pump.clone();
         let pump = Box::new(move || -> Result<bool, Box<dyn Error>> {
@@ -149,7 +143,7 @@ impl Channel {
                 .ok_or("Failed to downcast write channel state")?;
             if let Ok(message) = state.message_receiver.try_recv() {
                 let mut packet = Vec::new();
-                state.serializer.encode(&message, &mut packet)?;
+                C::encode(&message, &mut packet)?;
                 state
                     .packet_sender
                     .send(packet)
@@ -169,7 +163,7 @@ impl Channel {
                 .ok_or("Failed to downcast write channel state")?;
             for message in state.message_receiver.drain() {
                 let mut packet = Vec::new();
-                state.serializer.encode(&message, &mut packet)?;
+                C::encode(&message, &mut packet)?;
                 state
                     .packet_sender
                     .send(packet)
@@ -251,10 +245,13 @@ impl Channel {
 impl Future for Channel {
     type Output = Result<(), Box<dyn Error>>;
 
-    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.pump() {
             Ok(true) => Poll::Ready(Ok(())),
-            Ok(false) => Poll::Pending,
+            Ok(false) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
@@ -263,31 +260,13 @@ impl Future for Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::tests::PostcardCodec;
     use flume::unbounded;
+    use serde::{Deserialize, Serialize};
 
+    #[derive(Serialize, Deserialize)]
     struct TestMessage {
         pub id: u32,
-    }
-
-    struct TestPacketSerializer;
-
-    impl PacketSerializer<TestMessage> for TestPacketSerializer {
-        fn encode(
-            &mut self,
-            message: &TestMessage,
-            buffer: &mut Vec<u8>,
-        ) -> Result<(), Box<dyn Error>> {
-            buffer.extend_from_slice(&message.id.to_le_bytes());
-            Ok(())
-        }
-
-        fn decode(&mut self, buffer: &[u8]) -> Result<TestMessage, Box<dyn Error>> {
-            if buffer.len() != 4 {
-                return Err("Invalid buffer length".into());
-            }
-            let id = u32::from_le_bytes(buffer.try_into().unwrap());
-            Ok(TestMessage { id })
-        }
     }
 
     #[test]
@@ -302,7 +281,7 @@ mod tests {
         let (msg_tx, msg_rx) = unbounded();
         let (pkt_tx, pkt_rx) = unbounded();
 
-        let mut channel = Channel::write(pkt_tx, msg_rx, TestPacketSerializer);
+        let mut channel = Channel::write::<PostcardCodec<TestMessage>, _>(pkt_tx, msg_rx);
 
         let message = TestMessage { id: 42 };
         msg_tx.send(message).unwrap();
@@ -310,7 +289,7 @@ mod tests {
         channel.pump().unwrap();
 
         let packet = pkt_rx.recv().unwrap();
-        let message = TestPacketSerializer.decode(&packet).unwrap();
+        let message = PostcardCodec::<TestMessage>::decode(&mut packet.as_slice()).unwrap();
         assert_eq!(message.id, 42);
     }
 
@@ -319,11 +298,11 @@ mod tests {
         let (msg_tx, msg_rx) = unbounded();
         let (pkt_tx, pkt_rx) = unbounded();
 
-        let mut channel = Channel::read(pkt_rx, msg_tx, TestPacketSerializer);
+        let mut channel = Channel::read::<PostcardCodec<TestMessage>, _>(pkt_rx, msg_tx);
 
         let message = TestMessage { id: 42 };
         let mut packet = Vec::new();
-        TestPacketSerializer.encode(&message, &mut packet).unwrap();
+        PostcardCodec::<TestMessage>::encode(&message, &mut packet).unwrap();
         pkt_tx.send(packet).unwrap();
 
         channel.pump().unwrap();
