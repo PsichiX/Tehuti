@@ -67,6 +67,59 @@ pub trait Replicable: Sized {
     fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>>;
 }
 
+impl Replicable for () {
+    fn collect_changes(&self, _: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, _: &mut dyn Read) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+}
+
+macro_rules! impl_replicable_tuple {
+    ( $( $id:ident ),+ ) => {
+        #[allow(non_snake_case)]
+        impl<$( $id ),+> Replicable for ( $( $id, )+ )
+        where
+            $( $id: Replicable ),+
+        {
+            fn collect_changes(&self, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+                let ( $( $id, )+ ) = self;
+                $(
+                    $id.collect_changes(buffer)?;
+                )+
+                Ok(())
+            }
+
+            fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>> {
+                let ( $( $id, )+ ) = self;
+                $(
+                    $id.apply_changes(buffer)?;
+                )+
+                Ok(())
+            }
+        }
+    };
+}
+
+impl_replicable_tuple!(A);
+impl_replicable_tuple!(A, B);
+impl_replicable_tuple!(A, B, C);
+impl_replicable_tuple!(A, B, C, D);
+impl_replicable_tuple!(A, B, C, D, E);
+impl_replicable_tuple!(A, B, C, D, E, F);
+impl_replicable_tuple!(A, B, C, D, E, F, G);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I, J);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I, J, K);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_replicable_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+
 pub struct Replicated<P, T>
 where
     P: ReplicationPolicy<T>,
@@ -285,15 +338,12 @@ where
     }
 }
 
-pub struct CodecRep<T, C: Codec<T>>
-where
-    T: Replicable,
-{
+pub struct CodecRep<T, C: Codec<Value = T>> {
     data: T,
     _phantom: PhantomData<fn() -> C>,
 }
 
-impl<T: Replicable, C: Codec<T>> CodecRep<T, C> {
+impl<T: Replicable, C: Codec<Value = T>> CodecRep<T, C> {
     pub fn new(data: T) -> Self {
         Self {
             data,
@@ -306,11 +356,7 @@ impl<T: Replicable, C: Codec<T>> CodecRep<T, C> {
     }
 }
 
-impl<T, C> Serialize for CodecRep<T, C>
-where
-    T: Replicable + Serialize,
-    C: Codec<T>,
-{
+impl<T: Serialize, C: Codec<Value = T>> Serialize for CodecRep<T, C> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -319,11 +365,7 @@ where
     }
 }
 
-impl<'de, T, C> Deserialize<'de> for CodecRep<T, C>
-where
-    T: Replicable + Deserialize<'de>,
-    C: Codec<T>,
-{
+impl<'de, T: Deserialize<'de>, C: Codec<Value = T>> Deserialize<'de> for CodecRep<T, C> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -336,7 +378,7 @@ where
     }
 }
 
-impl<T: Replicable, C: Codec<T>> Replicable for CodecRep<T, C> {
+impl<T, C: Codec<Value = T>> Replicable for CodecRep<T, C> {
     fn collect_changes(&self, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
         C::encode(&self.data, buffer)
     }
@@ -347,37 +389,31 @@ impl<T: Replicable, C: Codec<T>> Replicable for CodecRep<T, C> {
     }
 }
 
-impl<T: Replicable, C: Codec<T>> std::fmt::Debug for CodecRep<T, C>
-where
-    T: std::fmt::Debug,
-{
+impl<T: std::fmt::Debug, C: Codec<Value = T>> std::fmt::Debug for CodecRep<T, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(&self.data, f)
     }
 }
 
-impl<T: Replicable, C: Codec<T>> std::fmt::Display for CodecRep<T, C>
-where
-    T: std::fmt::Display,
-{
+impl<T: std::fmt::Display, C: Codec<Value = T>> std::fmt::Display for CodecRep<T, C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.data, f)
     }
 }
 
-impl<T: Replicable, C: Codec<T>> AsRef<T> for CodecRep<T, C> {
+impl<T, C: Codec<Value = T>> AsRef<T> for CodecRep<T, C> {
     fn as_ref(&self) -> &T {
         &self.data
     }
 }
 
-impl<T: Replicable, C: Codec<T>> AsMut<T> for CodecRep<T, C> {
+impl<T, C: Codec<Value = T>> AsMut<T> for CodecRep<T, C> {
     fn as_mut(&mut self) -> &mut T {
         &mut self.data
     }
 }
 
-impl<T: Replicable, C: Codec<T>> From<T> for CodecRep<T, C> {
+impl<T, C: Codec<Value = T>> From<T> for CodecRep<T, C> {
     fn from(data: T) -> Self {
         Self {
             data,
@@ -386,7 +422,7 @@ impl<T: Replicable, C: Codec<T>> From<T> for CodecRep<T, C> {
     }
 }
 
-impl<T: Replicable + Default, C: Codec<T>> Default for CodecRep<T, C> {
+impl<T: Default, C: Codec<Value = T>> Default for CodecRep<T, C> {
     fn default() -> Self {
         Self {
             data: T::default(),
@@ -395,7 +431,7 @@ impl<T: Replicable + Default, C: Codec<T>> Default for CodecRep<T, C> {
     }
 }
 
-impl<T: Replicable + Clone, C: Codec<T>> Clone for CodecRep<T, C> {
+impl<T: Clone, C: Codec<Value = T>> Clone for CodecRep<T, C> {
     fn clone(&self) -> Self {
         Self {
             data: self.data.clone(),
@@ -404,33 +440,33 @@ impl<T: Replicable + Clone, C: Codec<T>> Clone for CodecRep<T, C> {
     }
 }
 
-impl<T: Replicable + PartialEq, C: Codec<T>> PartialEq for CodecRep<T, C> {
+impl<T: PartialEq, C: Codec<Value = T>> PartialEq for CodecRep<T, C> {
     fn eq(&self, other: &Self) -> bool {
         self.data == other.data
     }
 }
 
-impl<T: Replicable + Eq, C: Codec<T>> Eq for CodecRep<T, C> {}
+impl<T: Eq, C: Codec<Value = T>> Eq for CodecRep<T, C> {}
 
-impl<T: Replicable + PartialOrd, C: Codec<T>> PartialOrd for CodecRep<T, C> {
+impl<T: PartialOrd, C: Codec<Value = T>> PartialOrd for CodecRep<T, C> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.data.partial_cmp(&other.data)
     }
 }
 
-impl<T: Replicable + Ord, C: Codec<T>> Ord for CodecRep<T, C> {
+impl<T: Ord, C: Codec<Value = T>> Ord for CodecRep<T, C> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.data.cmp(&other.data)
     }
 }
 
-impl<T: Replicable + Hash, C: Codec<T>> Hash for CodecRep<T, C> {
+impl<T: Hash, C: Codec<Value = T>> Hash for CodecRep<T, C> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.data.hash(state);
     }
 }
 
-impl<T: Replicable, C: Codec<T>> Deref for CodecRep<T, C> {
+impl<T, C: Codec<Value = T>> Deref for CodecRep<T, C> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -438,7 +474,7 @@ impl<T: Replicable, C: Codec<T>> Deref for CodecRep<T, C> {
     }
 }
 
-impl<T: Replicable, C: Codec<T>> DerefMut for CodecRep<T, C> {
+impl<T, C: Codec<Value = T>> DerefMut for CodecRep<T, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
     }
@@ -447,7 +483,7 @@ impl<T: Replicable, C: Codec<T>> DerefMut for CodecRep<T, C> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::codec::tests::PostcardCodec;
+    use crate::codec::postcard::PostcardCodec;
     use serde::{Deserialize, Serialize};
     use std::error::Error;
 

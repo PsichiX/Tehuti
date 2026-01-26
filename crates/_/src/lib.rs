@@ -36,10 +36,12 @@ pub mod meeting;
 pub mod peer;
 pub mod protocol;
 pub mod replication;
+pub mod rpc;
 
 pub mod third_party {
     pub use flume;
     pub use tracing;
+    pub use typid;
 }
 
 use flume::{Receiver, Sender, bounded, unbounded};

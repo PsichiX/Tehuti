@@ -819,33 +819,14 @@ macro_rules! mock_recv_matching {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        error::Error,
-        io::{Read, Write},
-        sync::Arc,
-    };
+    use std::{error::Error, sync::Arc};
     use tehuti::{
         channel::{ChannelId, ChannelMode},
-        codec::Codec,
+        codec::string::StringCodec,
         meeting::MeetingUserEvent,
         peer::{PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
         third_party::flume::Receiver,
     };
-
-    struct StringCodec;
-
-    impl Codec<String> for StringCodec {
-        fn encode(message: &String, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
-            buffer.write_all(message.as_bytes())?;
-            Ok(())
-        }
-
-        fn decode(buffer: &mut dyn Read) -> Result<String, Box<dyn Error>> {
-            let mut vec = Vec::new();
-            buffer.read_to_end(&mut vec)?;
-            Ok(String::from_utf8(vec)?)
-        }
-    }
 
     struct Chatter {
         pub sender: Sender<String>,

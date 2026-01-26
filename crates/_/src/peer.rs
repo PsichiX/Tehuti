@@ -289,7 +289,7 @@ impl PeerBuilder {
         }
     }
 
-    pub fn bind_read<C: Codec<Message> + Send + 'static, Message: Send + 'static>(
+    pub fn bind_read<C: Codec<Value = Message> + Send + 'static, Message: Send + 'static>(
         mut self,
         channel_id: ChannelId,
         mode: ChannelMode,
@@ -314,7 +314,7 @@ impl PeerBuilder {
         self
     }
 
-    pub fn bind_write<C: Codec<Message> + Send + 'static, Message: Send + 'static>(
+    pub fn bind_write<C: Codec<Value = Message> + Send + 'static, Message: Send + 'static>(
         mut self,
         channel_id: ChannelId,
         mode: ChannelMode,
@@ -482,9 +482,8 @@ impl PeerFactory {
 
 #[cfg(test)]
 mod tests {
-    use crate::codec::tests::PostcardCodec;
-
     use super::*;
+    use crate::codec::postcard::PostcardCodec;
 
     #[test]
     fn test_async() {

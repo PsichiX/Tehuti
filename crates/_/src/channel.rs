@@ -63,7 +63,7 @@ pub struct Channel {
 }
 
 impl Channel {
-    pub fn read<C: Codec<Message>, Message: Send + 'static>(
+    pub fn read<C: Codec<Value = Message>, Message: Send + 'static>(
         packet_receiver: Receiver<Vec<u8>>,
         message_sender: Sender<Message>,
     ) -> Self {
@@ -120,7 +120,7 @@ impl Channel {
         }
     }
 
-    pub fn write<C: Codec<Message>, Message: Send + 'static>(
+    pub fn write<C: Codec<Value = Message>, Message: Send + 'static>(
         packet_sender: Sender<Vec<u8>>,
         message_receiver: Receiver<Message>,
     ) -> Self {
@@ -260,7 +260,7 @@ impl Future for Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::tests::PostcardCodec;
+    use crate::codec::postcard::PostcardCodec;
     use flume::unbounded;
     use serde::{Deserialize, Serialize};
 
