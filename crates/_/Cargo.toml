@@ -1,6 +1,6 @@
 [package]
 name = "tehuti"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
 description = "Modular communication system for game development."
@@ -20,6 +20,7 @@ tracing = "0.1"
 serde = "1"
 postcard = { version = "1", features = ["use-std"], optional = true }
 typid = "1"
+seahash = "4"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

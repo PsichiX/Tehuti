@@ -1,9 +1,13 @@
-use crate::{Duplex, codec::Codec};
-use flume::{Receiver, Sender};
+use seahash::SeaHasher;
+
+use crate::{
+    codec::Codec,
+    event::{Duplex, Receiver, Sender},
+};
 use std::{
     any::{Any, TypeId},
     error::Error,
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -18,7 +22,7 @@ impl ChannelId {
     }
 
     pub fn hashed<T: Hash>(item: &T) -> Self {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SeaHasher::default();
         item.hash(&mut hasher);
         Self(hasher.finish())
     }
@@ -84,7 +88,7 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
-            if let Ok(packet) = state.packet_receiver.try_recv() {
+            if let Some(packet) = state.packet_receiver.try_recv() {
                 let message = C::decode(&mut packet.as_slice())?;
                 state
                     .message_sender
@@ -103,7 +107,7 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
-            for packet in state.packet_receiver.drain() {
+            for packet in state.packet_receiver.iter() {
                 let message = C::decode(&mut packet.as_slice())?;
                 state
                     .message_sender
@@ -141,7 +145,7 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast write channel state")?;
-            if let Ok(message) = state.message_receiver.try_recv() {
+            if let Some(message) = state.message_receiver.try_recv() {
                 let mut packet = Vec::new();
                 C::encode(&message, &mut packet)?;
                 state
@@ -161,7 +165,7 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast write channel state")?;
-            for message in state.message_receiver.drain() {
+            for message in state.message_receiver.iter() {
                 let mut packet = Vec::new();
                 C::encode(&message, &mut packet)?;
                 state
@@ -193,7 +197,7 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast pipe channel state")?;
-            if let Ok(message) = state.message.receiver.try_recv() {
+            if let Some(message) = state.message.receiver.try_recv() {
                 state
                     .message
                     .sender
@@ -212,7 +216,7 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast pipe channel state")?;
-            for message in state.message.receiver.drain() {
+            for message in state.message.receiver.iter() {
                 state
                     .message
                     .sender
@@ -260,8 +264,7 @@ impl Future for Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::postcard::PostcardCodec;
-    use flume::unbounded;
+    use crate::{codec::postcard::PostcardCodec, event::unbounded};
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize)]
@@ -288,7 +291,7 @@ mod tests {
 
         channel.pump().unwrap();
 
-        let packet = pkt_rx.recv().unwrap();
+        let packet = pkt_rx.recv_blocking().unwrap();
         let message = PostcardCodec::<TestMessage>::decode(&mut packet.as_slice()).unwrap();
         assert_eq!(message.id, 42);
     }
@@ -307,7 +310,7 @@ mod tests {
 
         channel.pump().unwrap();
 
-        let message = msg_rx.recv().unwrap();
+        let message = msg_rx.recv_blocking().unwrap();
         assert_eq!(message.id, 42);
     }
 
@@ -322,7 +325,7 @@ mod tests {
 
         channel.pump().unwrap();
 
-        let message = comm.receiver.recv().unwrap();
+        let message = comm.receiver.recv_blocking().unwrap();
         assert_eq!(message.id, 42);
     }
 }

@@ -1,7 +1,7 @@
 use crate::{
-    Duplex,
     channel::Channel,
     engine::EnginePeerDescriptor,
+    event::Duplex,
     peer::{Peer, PeerBuildResult, PeerFactory, PeerId, PeerRoleId},
 };
 use std::{
@@ -55,14 +55,12 @@ impl Drop for Meeting {
             .engine_event
             .sender
             .send(MeetingEngineEvent::MeetingDestroyed);
-        if cfg!(not(miri)) {
-            tracing::event!(
-                target: "tehuti::meeting",
-                tracing::Level::TRACE,
-                "Meeting {} closed",
-                self.name
-            );
-        }
+        tracing::event!(
+            target: "tehuti::meeting",
+            tracing::Level::TRACE,
+            "Meeting {} closed",
+            self.name
+        );
     }
 }
 
@@ -74,14 +72,12 @@ impl Meeting {
         name: impl ToString,
     ) -> Self {
         let name = name.to_string();
-        if cfg!(not(miri)) {
-            tracing::event!(
-                target: "tehuti::meeting",
-                tracing::Level::TRACE,
-                "Meeting {} opened",
-                name
-            );
-        }
+        tracing::event!(
+            target: "tehuti::meeting",
+            tracing::Level::TRACE,
+            "Meeting {} opened",
+            name
+        );
         Self {
             factory,
             engine_event,
@@ -97,11 +93,11 @@ impl Meeting {
 
     pub fn pump(&mut self) -> Result<bool, Box<dyn Error>> {
         let mut result = false;
-        if let Ok(event) = self.engine_event.receiver.try_recv() {
+        if let Some(event) = self.engine_event.receiver.try_recv() {
             self.handle_engine_event(event)?;
             result = true;
         }
-        if let Ok(event) = self.user_event.receiver.try_recv() {
+        if let Some(event) = self.user_event.receiver.try_recv() {
             self.handle_user_event(event)?;
             result = true;
         }
@@ -115,11 +111,11 @@ impl Meeting {
 
     pub fn pump_all(&mut self) -> Result<bool, Box<dyn Error>> {
         let mut result = false;
-        while let Ok(event) = self.engine_event.receiver.try_recv() {
+        while let Some(event) = self.engine_event.receiver.try_recv() {
             self.handle_engine_event(event)?;
             result = true;
         }
-        while let Ok(event) = self.user_event.receiver.try_recv() {
+        while let Some(event) = self.user_event.receiver.try_recv() {
             self.handle_user_event(event)?;
             result = true;
         }
@@ -132,15 +128,13 @@ impl Meeting {
     }
 
     fn handle_engine_event(&mut self, event: MeetingEngineEvent) -> Result<(), Box<dyn Error>> {
-        if cfg!(not(miri)) {
-            tracing::event!(
-                target: "tehuti::meeting",
-                tracing::Level::TRACE,
-                "Meeting {} handle engine event: {:?}",
-                self.name,
-                event
-            );
-        }
+        tracing::event!(
+            target: "tehuti::meeting",
+            tracing::Level::TRACE,
+            "Meeting {} handle engine event: {:?}",
+            self.name,
+            event
+        );
         match event {
             MeetingEngineEvent::PeerJoined(peer_id, role_id) => {
                 let PeerBuildResult {
@@ -182,15 +176,13 @@ impl Meeting {
     }
 
     fn handle_user_event(&mut self, event: MeetingUserEvent) -> Result<(), Box<dyn Error>> {
-        if cfg!(not(miri)) {
-            tracing::event!(
-                target: "tehuti::meeting",
-                tracing::Level::TRACE,
-                "Meeting {} handle user event: {:?}",
-                self.name,
-                event
-            );
-        }
+        tracing::event!(
+            target: "tehuti::meeting",
+            tracing::Level::TRACE,
+            "Meeting {} handle user event: {:?}",
+            self.name,
+            event
+        );
         match event {
             MeetingUserEvent::PeerCreate(peer_id, role_id) => {
                 let PeerBuildResult {

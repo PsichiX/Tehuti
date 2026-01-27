@@ -1,17 +1,18 @@
+use seahash::SeaHasher;
+
 use crate::{
     channel::{Channel, ChannelId, ChannelMode},
     codec::Codec,
     engine::{EnginePacketReceiver, EnginePacketSender, EnginePeerDescriptor},
+    event::{Receiver, Sender, bounded, unbounded},
     meeting::MeetingUserEvent,
 };
-use flume::{Receiver, Sender, bounded, unbounded};
 use std::{
     any::{Any, TypeId},
     collections::BTreeMap,
     error::Error,
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
     sync::Arc,
-    time::Duration,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,7 +43,7 @@ impl PeerRoleId {
     }
 
     pub fn hashed<T: Hash>(item: &T) -> Self {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = SeaHasher::default();
         item.hash(&mut hasher);
         Self(hasher.finish())
     }
@@ -110,6 +111,50 @@ impl Peer {
         &self.info
     }
 
+    pub(crate) fn sender<Message: Send + 'static>(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<&Sender<Message>, Box<dyn Error>> {
+        self.senders
+            .get(&channel_id)
+            .ok_or_else(|| {
+                format!(
+                    "Peer {:?} has no message sender with id {:?}",
+                    self.info.peer_id, channel_id
+                )
+            })?
+            .downcast_ref::<Sender<Message>>()
+            .ok_or_else(|| {
+                format!(
+                    "Message sender {:?} for Peer {:?} has different message type",
+                    channel_id, self.info.peer_id
+                )
+                .into()
+            })
+    }
+
+    pub(crate) fn receiver<Message: Send + 'static>(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<&Receiver<Message>, Box<dyn Error>> {
+        self.receivers
+            .get(&channel_id)
+            .ok_or_else(|| {
+                format!(
+                    "Peer {:?} has no message receiver with id {:?}",
+                    self.info.peer_id, channel_id
+                )
+            })?
+            .downcast_ref::<Receiver<Message>>()
+            .ok_or_else(|| {
+                format!(
+                    "Message receiver {:?} for Peer {:?} has different message type",
+                    channel_id, self.info.peer_id
+                )
+                .into()
+            })
+    }
+
     pub fn send<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
@@ -164,7 +209,7 @@ impl Peer {
     pub fn recv<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-    ) -> Result<Message, Box<dyn Error>> {
+    ) -> Result<Option<Message>, Box<dyn Error>> {
         let receiver = self
             .receivers
             .get(&channel_id)
@@ -181,54 +226,7 @@ impl Peer {
                     channel_id, self.info.peer_id
                 )
             })?;
-        Ok(receiver.recv()?)
-    }
-
-    pub fn recv_timeout<Message: Send + 'static>(
-        &self,
-        channel_id: ChannelId,
-        timeout: Duration,
-    ) -> Result<Message, Box<dyn Error>> {
-        let receiver = self
-            .receivers
-            .get(&channel_id)
-            .ok_or_else(|| {
-                format!(
-                    "Peer {:?} has no message receiver with id {:?}",
-                    self.info.peer_id, channel_id
-                )
-            })?
-            .downcast_ref::<Receiver<Message>>()
-            .ok_or_else(|| {
-                format!(
-                    "Message receiver {:?} for Peer {:?} has different message type",
-                    channel_id, self.info.peer_id
-                )
-            })?;
-        Ok(receiver.recv_timeout(timeout)?)
-    }
-
-    pub fn try_recv<Message: Send + 'static>(
-        &self,
-        channel_id: ChannelId,
-    ) -> Result<Message, Box<dyn Error>> {
-        let receiver = self
-            .receivers
-            .get(&channel_id)
-            .ok_or_else(|| {
-                format!(
-                    "Peer {:?} has no message receiver with id {:?}",
-                    self.info.peer_id, channel_id
-                )
-            })?
-            .downcast_ref::<Receiver<Message>>()
-            .ok_or_else(|| {
-                format!(
-                    "Message receiver {:?} for Peer {:?} has different message type",
-                    channel_id, self.info.peer_id
-                )
-            })?;
-        Ok(receiver.try_recv()?)
+        receiver.recv()
     }
 
     pub async fn recv_async<Message: Send + 'static>(
@@ -337,6 +335,16 @@ impl PeerBuilder {
             .senders
             .insert(channel_id, Box::new(message_tx) as Box<dyn Any + Send>);
         self
+    }
+
+    pub fn bind_read_write<C: Codec<Value = Message> + Send + 'static, Message: Send + 'static>(
+        self,
+        channel_id: ChannelId,
+        mode: ChannelMode,
+        capacity: Option<usize>,
+    ) -> Self {
+        self.bind_read::<C, Message>(channel_id, mode, capacity)
+            .bind_write::<C, Message>(channel_id, mode, capacity)
     }
 
     pub fn build(self) -> PeerBuildResult {
@@ -483,7 +491,6 @@ impl PeerFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::postcard::PostcardCodec;
 
     #[test]
     fn test_async() {
@@ -499,16 +506,8 @@ mod tests {
     fn test_peer() {
         let factory = PeerFactory::default().with(PeerRoleId::new(0), |builder| {
             builder
-                .bind_read::<PostcardCodec<u8>, u8>(
-                    ChannelId::new(0),
-                    ChannelMode::ReliableOrdered,
-                    None,
-                )
-                .bind_write::<PostcardCodec<u8>, u8>(
-                    ChannelId::new(0),
-                    ChannelMode::ReliableOrdered,
-                    None,
-                )
+                .bind_read::<u8, u8>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
+                .bind_write::<u8, u8>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
         });
         let (meeting_tx, _) = unbounded();
 
@@ -535,13 +534,13 @@ mod tests {
             .get(&ChannelId::new(0))
             .unwrap()
             .receiver
-            .try_recv()
+            .recv_blocking()
             .unwrap();
-        let message = PostcardCodec::<u8>::decode(&mut packet.as_slice()).unwrap();
+        let message = u8::decode(&mut packet.as_slice()).unwrap();
         assert_eq!(message, 42u8);
 
         let mut packet = Vec::new();
-        PostcardCodec::<u8>::encode(&100, &mut packet).unwrap();
+        u8::encode(&100, &mut packet).unwrap();
         descriptor
             .packet_senders
             .get(&ChannelId::new(0))
@@ -554,7 +553,7 @@ mod tests {
             channel.pump_all().unwrap();
         }
 
-        let received_message = peer.try_recv::<u8>(ChannelId::new(0)).unwrap();
+        let received_message = peer.recv::<u8>(ChannelId::new(0)).unwrap().unwrap();
         assert_eq!(received_message, 100u8);
     }
 }

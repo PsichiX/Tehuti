@@ -32,74 +32,15 @@
 pub mod channel;
 pub mod codec;
 pub mod engine;
+pub mod event;
 pub mod meeting;
 pub mod peer;
 pub mod protocol;
+pub mod replica;
 pub mod replication;
 pub mod rpc;
 
 pub mod third_party {
-    pub use flume;
     pub use tracing;
     pub use typid;
-}
-
-use flume::{Receiver, Sender, bounded, unbounded};
-
-#[derive(Debug, Clone)]
-pub struct Duplex<T> {
-    pub sender: Sender<T>,
-    pub receiver: Receiver<T>,
-}
-
-impl<T> Duplex<T> {
-    pub fn unbounded() -> Self {
-        let (tx, rx) = unbounded();
-        Self {
-            sender: tx,
-            receiver: rx,
-        }
-    }
-
-    pub fn bounded(capacity: usize) -> Self {
-        let (tx, rx) = bounded(capacity);
-        Self {
-            sender: tx,
-            receiver: rx,
-        }
-    }
-
-    pub fn crossing_unbounded() -> (Self, Self) {
-        let (tx1, rx1) = unbounded();
-        let (tx2, rx2) = unbounded();
-        (
-            Self {
-                sender: tx1,
-                receiver: rx2,
-            },
-            Self {
-                sender: tx2,
-                receiver: rx1,
-            },
-        )
-    }
-
-    pub fn crossing_bounded(capacity: usize) -> (Self, Self) {
-        let (tx1, rx1) = bounded(capacity);
-        let (tx2, rx2) = bounded(capacity);
-        (
-            Self {
-                sender: tx1,
-                receiver: rx2,
-            },
-            Self {
-                sender: tx2,
-                receiver: rx1,
-            },
-        )
-    }
-
-    pub fn new(sender: Sender<T>, receiver: Receiver<T>) -> Self {
-        Self { sender, receiver }
-    }
 }

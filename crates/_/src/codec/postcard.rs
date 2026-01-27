@@ -13,7 +13,7 @@ impl<T: Serialize + DeserializeOwned> Codec for PostcardCodec<T> {
 
     fn encode(message: &T, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
         let data = postcard::to_allocvec(message)?;
-        buffer.write_all(&(data.len() as u64).to_be_bytes())?;
+        buffer.write_all(&(data.len() as u64).to_le_bytes())?;
         buffer.write_all(&data)?;
         Ok(())
     }
@@ -21,7 +21,7 @@ impl<T: Serialize + DeserializeOwned> Codec for PostcardCodec<T> {
     fn decode(buffer: &mut dyn Read) -> Result<T, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
-        let len = u64::from_be_bytes(len_buf) as usize;
+        let len = u64::from_le_bytes(len_buf) as usize;
         let mut data = vec![0u8; len];
         buffer.read_exact(&mut data)?;
         Ok(postcard::from_bytes::<T>(&data)?)
@@ -29,7 +29,7 @@ impl<T: Serialize + DeserializeOwned> Codec for PostcardCodec<T> {
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
 

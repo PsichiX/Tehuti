@@ -19,16 +19,16 @@ impl ProtocolControlFrame {
         match self {
             ProtocolControlFrame::Heartbeat { timestamp } => {
                 stream.write_all(&[0])?;
-                stream.write_all(&timestamp.to_be_bytes())?;
+                stream.write_all(&timestamp.to_le_bytes())?;
             }
             ProtocolControlFrame::CreatePeer(peer_id, role_id) => {
                 stream.write_all(&[1])?;
-                stream.write_all(&peer_id.id().to_be_bytes())?;
-                stream.write_all(&role_id.id().to_be_bytes())?;
+                stream.write_all(&peer_id.id().to_le_bytes())?;
+                stream.write_all(&role_id.id().to_le_bytes())?;
             }
             ProtocolControlFrame::DestroyPeer(peer_id) => {
                 stream.write_all(&[2])?;
-                stream.write_all(&peer_id.id().to_be_bytes())?;
+                stream.write_all(&peer_id.id().to_le_bytes())?;
             }
         }
         Ok(())
@@ -41,7 +41,7 @@ impl ProtocolControlFrame {
             0 => {
                 let mut timestamp_bytes = [0u8; std::mem::size_of::<u64>()];
                 stream.read_exact(&mut timestamp_bytes)?;
-                let timestamp = u64::from_be_bytes(timestamp_bytes);
+                let timestamp = u64::from_le_bytes(timestamp_bytes);
                 Ok(ProtocolControlFrame::Heartbeat { timestamp })
             }
             1 => {
@@ -49,14 +49,14 @@ impl ProtocolControlFrame {
                 let mut role_id_bytes = [0u8; std::mem::size_of::<u64>()];
                 stream.read_exact(&mut peer_id_bytes)?;
                 stream.read_exact(&mut role_id_bytes)?;
-                let peer_id = PeerId::new(u64::from_be_bytes(peer_id_bytes));
-                let role_id = PeerRoleId::new(u64::from_be_bytes(role_id_bytes));
+                let peer_id = PeerId::new(u64::from_le_bytes(peer_id_bytes));
+                let role_id = PeerRoleId::new(u64::from_le_bytes(role_id_bytes));
                 Ok(ProtocolControlFrame::CreatePeer(peer_id, role_id))
             }
             2 => {
                 let mut peer_id_bytes = [0u8; std::mem::size_of::<u64>()];
                 stream.read_exact(&mut peer_id_bytes)?;
-                let peer_id = PeerId::new(u64::from_be_bytes(peer_id_bytes));
+                let peer_id = PeerId::new(u64::from_le_bytes(peer_id_bytes));
                 Ok(ProtocolControlFrame::DestroyPeer(peer_id))
             }
             _ => Err(Error::new(
@@ -78,10 +78,10 @@ pub struct ProtocolPacketFrame {
 
 impl ProtocolPacketFrame {
     pub fn write(&self, stream: &mut dyn Write) -> Result<()> {
-        stream.write_all(&self.peer_id.id().to_be_bytes())?;
-        stream.write_all(&self.channel_id.id().to_be_bytes())?;
+        stream.write_all(&self.peer_id.id().to_le_bytes())?;
+        stream.write_all(&self.channel_id.id().to_le_bytes())?;
         let data_len = self.data.len() as u32;
-        stream.write_all(&data_len.to_be_bytes())?;
+        stream.write_all(&data_len.to_le_bytes())?;
         stream.write_all(&self.data)?;
         Ok(())
     }
@@ -93,12 +93,12 @@ impl ProtocolPacketFrame {
         stream.read_exact(&mut peer_id_bytes)?;
         stream.read_exact(&mut channel_id_bytes)?;
         stream.read_exact(&mut data_len_bytes)?;
-        let data_len = u32::from_be_bytes(data_len_bytes) as usize;
+        let data_len = u32::from_le_bytes(data_len_bytes) as usize;
         let mut data = vec![0u8; data_len];
         stream.read_exact(&mut data)?;
         Ok(ProtocolPacketFrame {
-            peer_id: PeerId::new(u64::from_be_bytes(peer_id_bytes)),
-            channel_id: ChannelId::new(u64::from_be_bytes(channel_id_bytes)),
+            peer_id: PeerId::new(u64::from_le_bytes(peer_id_bytes)),
+            channel_id: ChannelId::new(u64::from_le_bytes(channel_id_bytes)),
             data,
         })
     }

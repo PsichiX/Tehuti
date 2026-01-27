@@ -1,9 +1,9 @@
 use crate::{
     channel::{ChannelId, ChannelMode},
+    event::{Receiver, Sender},
     meeting::{Meeting, MeetingInterface},
     peer::{PeerFactory, PeerInfo},
 };
-use flume::{Receiver, Sender};
 use std::{collections::BTreeMap, error::Error, sync::Arc};
 
 pub trait EngineMeeting<MeetingConfig> {

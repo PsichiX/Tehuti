@@ -1,11 +1,13 @@
+pub mod containers;
 #[cfg(feature = "postcard")]
 pub mod postcard;
+pub mod primitives;
 pub mod raw_bytes;
-pub mod string;
 
 use std::{
     error::Error,
     io::{Read, Write},
+    marker::PhantomData,
 };
 
 pub trait Codec {
@@ -13,6 +15,18 @@ pub trait Codec {
 
     fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>>;
     fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>>;
+}
+
+impl<T> Codec for PhantomData<T> {
+    type Value = PhantomData<T>;
+
+    fn encode(_: &Self::Value, _: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    fn decode(_: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+        Ok(PhantomData)
+    }
 }
 
 impl Codec for () {
