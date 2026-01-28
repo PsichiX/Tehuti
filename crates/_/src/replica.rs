@@ -16,11 +16,11 @@ use std::{
 pub struct ReplicaId(u64);
 
 impl ReplicaId {
-    pub fn new(id: u64) -> Self {
+    pub const fn new(id: u64) -> Self {
         Self(id)
     }
 
-    pub fn id(&self) -> u64 {
+    pub const fn id(&self) -> u64 {
         self.0
     }
 }
@@ -350,7 +350,7 @@ mod tests {
     use crate::{
         channel::{ChannelId, ChannelMode},
         peer::{PeerBuildResult, PeerBuilder, PeerId, PeerRoleId},
-        replication::MemReplicated,
+        replication::HashReplicated,
     };
 
     #[test]
@@ -406,7 +406,7 @@ mod tests {
             )
             .build();
 
-        let mut data = MemReplicated::new(42u32);
+        let mut data = HashReplicated::new(42u32);
         let mut set = ReplicaSet::default();
         set.bind(&peer, Some(ChannelId::new(0)), None);
         let replica = set.create(ReplicaId::new(0)).unwrap();
@@ -499,7 +499,7 @@ mod tests {
             .receiver
             .recv_blocking()
             .unwrap();
-        assert_eq!(packet.len(), 53);
+        assert_eq!(packet.len(), 61);
 
         descriptor
             .packet_senders

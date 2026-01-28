@@ -2,7 +2,6 @@ pub mod containers;
 pub mod primitives;
 
 use crate::codec::Codec;
-use seahash::SeaHasher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     error::Error,
@@ -14,11 +13,11 @@ use std::{
 
 pub type HashReplicated<T> = Replicated<HashRep, T>;
 pub type MutReplicated<T> = Replicated<MutRep, T>;
-pub type MemReplicated<T> = Replicated<MemRep, T>;
+pub type ManReplicated<T> = Replicated<ManRep, T>;
 pub type CodecReplicated<P, T, C> = Replicated<P, CodecRep<T, C>>;
 pub type HashCodecReplicated<T, C> = CodecReplicated<HashRep, T, C>;
 pub type MutCodecReplicated<T, C> = CodecReplicated<MutRep, T, C>;
-pub type MemCodecReplicated<T, C> = CodecReplicated<MemRep, T, C>;
+pub type ManCodecReplicated<T, C> = CodecReplicated<ManRep, T, C>;
 
 pub trait ReplicationPolicy<T>
 where
@@ -31,6 +30,7 @@ where
     fn on_mutation(&mut self, data: &T) {}
 }
 
+/// Change when data hash changes.
 #[derive(Default)]
 pub struct HashRep(u64);
 
@@ -40,13 +40,13 @@ where
 {
     fn detect_change(&mut self, data: &T) -> bool {
         let old_hash = self.0;
-        let mut hasher = SeaHasher::default();
-        data.hash(&mut hasher);
-        self.0 = hasher.finish();
+        let hash = crate::hash(data);
+        self.0 = hash;
         old_hash != self.0
     }
 }
 
+/// Change when data is potentially mutated (via DerefMut).
 pub struct MutRep(bool);
 
 impl Default for MutRep {
@@ -67,21 +67,20 @@ impl<T: Replicable> ReplicationPolicy<T> for MutRep {
     }
 }
 
-#[derive(Default)]
-pub struct MemRep(u64);
+/// Change when manually marked as changed.
+pub struct ManRep(bool);
 
-impl<T: Replicable> ReplicationPolicy<T> for MemRep {
-    fn detect_change(&mut self, data: &T) -> bool {
-        let old_hash = self.0;
-        let mut hasher = SeaHasher::default();
-        // TODO: miri yells here about UB due to uninitialized memory, most
-        // likely due to padding bytes in T that are inherently uninitialized.
-        let memory = unsafe {
-            std::slice::from_raw_parts((data as *const T) as *const u8, std::mem::size_of::<T>())
-        };
-        memory.hash(&mut hasher);
-        self.0 = hasher.finish();
-        old_hash != self.0
+impl Default for ManRep {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+impl<T: Replicable> ReplicationPolicy<T> for ManRep {
+    fn detect_change(&mut self, _data: &T) -> bool {
+        let old_state = self.0;
+        self.0 = false;
+        old_state
     }
 }
 
@@ -183,6 +182,10 @@ where
     pub fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>> {
         self.data.apply_changes(buffer)?;
         Ok(())
+    }
+
+    pub fn mark_changed(&mut self) {
+        self.meta = P::default();
     }
 }
 
@@ -512,7 +515,6 @@ mod tests {
 
     pub type HashPostcardReplicated<T> = HashCodecReplicated<T, PostcardCodec<T>>;
     pub type MutPostcardReplicated<T> = MutCodecReplicated<T, PostcardCodec<T>>;
-    pub type MemPostcardReplicated<T> = MemCodecReplicated<T, PostcardCodec<T>>;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
     struct Foo {
@@ -541,7 +543,7 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct Bar {
         a: f32,
-        foo: MemPostcardReplicated<Foo>,
+        foo: HashPostcardReplicated<Foo>,
     }
 
     #[test]
@@ -594,15 +596,10 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_replication() {
-        // NOTE: Skip memory-based replication tests under miri due to UB issues.
-        if cfg!(miri) {
-            return;
-        }
-
+    fn test_manual_replication() {
         let mut buffer = Vec::new();
 
-        let mut data = MemReplicated::new(Foo { a: 42, b: false });
+        let mut data = ManReplicated::new(Foo { a: 42, b: false });
         assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
         assert_eq!(buffer.len(), 5);
 
@@ -613,10 +610,16 @@ mod tests {
         data.b = true;
 
         buffer.clear();
+        assert!(!Replicated::collect_changes(&mut data, &mut buffer).unwrap());
+        assert_eq!(buffer.len(), 0);
+
+        data.mark_changed();
+
+        buffer.clear();
         assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
         assert_eq!(buffer.len(), 5);
 
-        let mut data2 = MemReplicated::new(Foo { a: 42, b: false });
+        let mut data2 = ManReplicated::new(Foo { a: 42, b: false });
         Replicated::apply_changes(&mut data2, &mut buffer.as_slice()).unwrap();
         assert_eq!(data2.a, 42);
         assert!(data2.b);
@@ -652,7 +655,7 @@ mod tests {
         let mut data = MutPostcardReplicated::<Bar>::new(
             Bar {
                 a: 4.2,
-                foo: MemPostcardReplicated::<Foo>::new(Foo { a: 42, b: false }.into()),
+                foo: HashPostcardReplicated::<Foo>::new(Foo { a: 42, b: false }.into()),
             }
             .into(),
         );
@@ -670,7 +673,7 @@ mod tests {
         let mut data2 = MutPostcardReplicated::<Bar>::new(
             Bar {
                 a: 4.2,
-                foo: MemPostcardReplicated::<Foo>::new(Foo { a: 42, b: false }.into()),
+                foo: HashPostcardReplicated::<Foo>::new(Foo { a: 42, b: false }.into()),
             }
             .into(),
         );

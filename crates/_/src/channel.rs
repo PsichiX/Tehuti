@@ -1,13 +1,11 @@
-use seahash::SeaHasher;
-
 use crate::{
     codec::Codec,
     event::{Duplex, Receiver, Sender},
 };
 use std::{
-    any::{Any, TypeId},
+    any::Any,
     error::Error,
-    hash::{Hash, Hasher},
+    hash::Hash,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -17,21 +15,19 @@ use std::{
 pub struct ChannelId(u64);
 
 impl ChannelId {
-    pub fn new(id: u64) -> Self {
+    pub const fn new(id: u64) -> Self {
         Self(id)
     }
 
     pub fn hashed<T: Hash>(item: &T) -> Self {
-        let mut hasher = SeaHasher::default();
-        item.hash(&mut hasher);
-        Self(hasher.finish())
+        Self(crate::hash(item))
     }
 
     pub fn typed<T: 'static>() -> Self {
-        Self::hashed(&TypeId::of::<T>())
+        Self::hashed(&std::any::type_name::<T>())
     }
 
-    pub fn id(&self) -> u64 {
+    pub const fn id(&self) -> u64 {
         self.0
     }
 }

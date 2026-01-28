@@ -1,5 +1,3 @@
-use seahash::SeaHasher;
-
 use crate::{
     channel::{Channel, ChannelId, ChannelMode},
     codec::Codec,
@@ -7,23 +5,17 @@ use crate::{
     event::{Receiver, Sender, bounded, unbounded},
     meeting::MeetingUserEvent,
 };
-use std::{
-    any::{Any, TypeId},
-    collections::BTreeMap,
-    error::Error,
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{any::Any, collections::BTreeMap, error::Error, hash::Hash, sync::Arc, time::Duration};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PeerId(u64);
 
 impl PeerId {
-    pub fn new(id: u64) -> Self {
+    pub const fn new(id: u64) -> Self {
         Self(id)
     }
 
-    pub fn id(&self) -> u64 {
+    pub const fn id(&self) -> u64 {
         self.0
     }
 }
@@ -38,21 +30,19 @@ impl std::fmt::Display for PeerId {
 pub struct PeerRoleId(u64);
 
 impl PeerRoleId {
-    pub fn new(id: u64) -> Self {
+    pub const fn new(id: u64) -> Self {
         Self(id)
     }
 
     pub fn hashed<T: Hash>(item: &T) -> Self {
-        let mut hasher = SeaHasher::default();
-        item.hash(&mut hasher);
-        Self(hasher.finish())
+        Self(crate::hash(item))
     }
 
     pub fn typed<T: 'static>() -> Self {
-        Self::hashed(&TypeId::of::<T>())
+        Self::hashed(&std::any::type_name::<T>())
     }
 
-    pub fn id(&self) -> u64 {
+    pub const fn id(&self) -> u64 {
         self.0
     }
 }
@@ -229,6 +219,53 @@ impl Peer {
         receiver.recv()
     }
 
+    pub fn recv_blocking<Message: Send + 'static>(
+        &self,
+        channel_id: ChannelId,
+    ) -> Result<Message, Box<dyn Error>> {
+        let receiver = self
+            .receivers
+            .get(&channel_id)
+            .ok_or_else(|| {
+                format!(
+                    "Peer {:?} has no message receiver with id {:?}",
+                    self.info.peer_id, channel_id
+                )
+            })?
+            .downcast_ref::<Receiver<Message>>()
+            .ok_or_else(|| {
+                format!(
+                    "Message receiver {:?} for Peer {:?} has different message type",
+                    channel_id, self.info.peer_id
+                )
+            })?;
+        receiver.recv_blocking()
+    }
+
+    pub fn recv_blocking_timeout<Message: Send + 'static>(
+        &self,
+        channel_id: ChannelId,
+        duration: Duration,
+    ) -> Result<Message, Box<dyn Error>> {
+        let receiver = self
+            .receivers
+            .get(&channel_id)
+            .ok_or_else(|| {
+                format!(
+                    "Peer {:?} has no message receiver with id {:?}",
+                    self.info.peer_id, channel_id
+                )
+            })?
+            .downcast_ref::<Receiver<Message>>()
+            .ok_or_else(|| {
+                format!(
+                    "Message receiver {:?} for Peer {:?} has different message type",
+                    channel_id, self.info.peer_id
+                )
+            })?;
+        receiver.recv_blocking_timeout(duration)
+    }
+
     pub async fn recv_async<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
@@ -385,6 +422,10 @@ impl PeerBuilder {
 }
 
 pub trait TypedPeer {
+    fn builder(builder: PeerBuilder) -> PeerBuilder {
+        builder
+    }
+
     fn into_typed(peer: PeerDestructurer) -> Result<Self, Box<dyn Error>>
     where
         Self: Sized;
@@ -463,12 +504,21 @@ impl PeerFactory {
         self
     }
 
+    pub fn with_typed<T: TypedPeer + 'static>(mut self) -> Self {
+        self.register_typed::<T>();
+        self
+    }
+
     pub fn register(
         &mut self,
         role_id: PeerRoleId,
         builder_fn: impl Fn(PeerBuilder) -> PeerBuilder + Send + Sync + 'static,
     ) {
         self.registry.insert(role_id, Arc::new(builder_fn));
+    }
+
+    pub fn register_typed<T: TypedPeer + 'static>(&mut self) {
+        self.register(PeerRoleId::typed::<T>(), T::builder);
     }
 
     pub fn create(

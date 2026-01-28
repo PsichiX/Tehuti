@@ -44,3 +44,12 @@ pub mod third_party {
     pub use tracing;
     pub use typid;
 }
+
+pub(crate) fn hash<T: std::hash::Hash>(data: &T) -> u64 {
+    use seahash::SeaHasher;
+    use std::hash::Hasher;
+
+    let mut hasher = SeaHasher::default();
+    data.hash(&mut hasher);
+    hasher.finish()
+}

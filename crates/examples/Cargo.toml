@@ -1,0 +1,10 @@
+[package]
+name = "examples"
+version = "0.5.0"
+edition = "2024"
+authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
+publish = false
+
+[dependencies]
+tehuti = { version = "0.5", path = "../_" }
+tehuti-mock = { version = "0.5", path = "../mock" }

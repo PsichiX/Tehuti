@@ -37,8 +37,7 @@ struct MockNetworkPortNode {
 #[derive(Default)]
 pub struct MockNetworkPortConfig {
     pub packet_lost_chance: f32,
-    pub base_latency: Duration,
-    pub latency: Range<Duration>,
+    pub latency_variations: Range<Duration>,
 }
 
 impl MockNetworkPortConfig {
@@ -47,10 +46,10 @@ impl MockNetworkPortConfig {
     }
 
     pub fn latency(&self) -> Duration {
-        if self.latency.is_empty() {
-            self.base_latency
+        if self.latency_variations.is_empty() {
+            Duration::ZERO
         } else {
-            self.base_latency + rand::random_range(self.latency.clone())
+            rand::random_range(self.latency_variations.clone())
         }
     }
 }
