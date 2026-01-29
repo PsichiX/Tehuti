@@ -791,6 +791,10 @@ mod tests {
     }
 
     impl TypedPeer for Chatter {
+        fn role_id() -> PeerRoleId {
+            PeerRoleId::new(0)
+        }
+
         fn into_typed(mut destructurer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
             let sender = destructurer.write::<String>(ChannelId::new(0))?;
             let receiver = destructurer.read::<String>(ChannelId::new(0))?;

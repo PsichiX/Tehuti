@@ -204,6 +204,14 @@ impl TcpSession {
             match frame {
                 ProtocolFrame::Control(frame) => match frame {
                     ProtocolControlFrame::CreatePeer(peer_id, peer_role_id) => {
+                        tracing::event!(
+                            target: "tehuti::socket::session",
+                            tracing::Level::TRACE,
+                            "Session {} got create peer {:?} with role {:?}",
+                            self.id,
+                            peer_id,
+                            peer_role_id,
+                        );
                         self.engine_event
                             .sender
                             .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
@@ -213,6 +221,13 @@ impl TcpSession {
                             .unwrap();
                     }
                     ProtocolControlFrame::DestroyPeer(peer_id) => {
+                        tracing::event!(
+                            target: "tehuti::socket::session",
+                            tracing::Level::TRACE,
+                            "Session {} got destroy peer {:?}",
+                            self.id,
+                            peer_id,
+                        );
                         self.engine_event
                             .sender
                             .send(MeetingEngineEvent::PeerLeft(peer_id))
@@ -234,6 +249,15 @@ impl TcpSession {
                 ProtocolFrame::Packet(frame) => {
                     if let Some(peer) = self.peers.get(&frame.peer_id) {
                         if let Some(sender) = peer.packet_senders.get(&frame.channel_id) {
+                            tracing::event!(
+                                target: "tehuti::socket::session",
+                                tracing::Level::TRACE,
+                                "Session {} got packet frame for peer {:?} channel {:?}: {} bytes",
+                                self.id,
+                                frame.peer_id,
+                                frame.channel_id,
+                                frame.data.len(),
+                            );
                             sender
                                 .sender
                                 .send(frame.data)
@@ -270,6 +294,15 @@ impl TcpSession {
         for peer in self.peers.values() {
             for (channel_id, receiver) in &peer.packet_receivers {
                 for data in receiver.receiver.iter() {
+                    tracing::event!(
+                        target: "tehuti::socket::session",
+                        tracing::Level::TRACE,
+                        "Session {} sending packet frame for peer {:?} channel {:?}: {} bytes",
+                        self.id,
+                        peer.info.peer_id,
+                        channel_id,
+                        data.len(),
+                    );
                     ProtocolFrame::Packet(ProtocolPacketFrame {
                         peer_id: peer.info.peer_id,
                         channel_id: *channel_id,

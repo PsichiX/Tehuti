@@ -1,6 +1,6 @@
 [package]
 name = "tehuti-socket"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
 description = "Socket engine for Tehuti communication system."
@@ -11,9 +11,9 @@ documentation = "https://docs.rs/tehuti-socket"
 readme = "../../README.md"
 
 [dependencies]
-tehuti = { version = "0.6", path = "../_" }
+tehuti = { version = "0.7", path = "../_" }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
-tehuti-mock = { version = "0.6", path = "../mock" }
+tehuti-mock = { version = "0.7", path = "../mock" }

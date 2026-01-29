@@ -29,6 +29,18 @@ impl<T> Sender<T> {
         Ok(())
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.0.is_full()
+    }
+
     pub fn inner(&self) -> &flume::Sender<T> {
         &self.0
     }
@@ -75,6 +87,18 @@ impl<T> Receiver<T> {
 
     pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
         std::iter::from_fn(|| self.try_recv())
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.0.is_full()
     }
 
     pub fn inner(&self) -> &flume::Receiver<T> {

@@ -2,7 +2,7 @@ use crate::{
     channel::{Channel, ChannelId, ChannelMode},
     codec::Codec,
     engine::{EnginePacketReceiver, EnginePacketSender, EnginePeerDescriptor},
-    event::{Receiver, Sender, bounded, unbounded},
+    event::{Duplex, Receiver, Sender, bounded, unbounded},
     meeting::MeetingUserEvent,
 };
 use std::{any::Any, collections::BTreeMap, error::Error, hash::Hash, sync::Arc, time::Duration};
@@ -427,6 +427,8 @@ impl PeerBuilder {
 }
 
 pub trait TypedPeer {
+    fn role_id() -> PeerRoleId;
+
     fn builder(builder: PeerBuilder) -> PeerBuilder {
         builder
     }
@@ -496,6 +498,15 @@ impl PeerDestructurer {
             })?;
         Ok(*sender)
     }
+
+    pub fn read_write<Message: Send + 'static>(
+        &mut self,
+        channel_id: ChannelId,
+    ) -> Result<Duplex<Message>, Box<dyn Error>> {
+        let receiver = self.read::<Message>(channel_id)?;
+        let sender = self.write::<Message>(channel_id)?;
+        Ok(Duplex { sender, receiver })
+    }
 }
 
 #[derive(Default)]
@@ -532,7 +543,7 @@ impl PeerFactory {
     }
 
     pub fn register_typed<T: TypedPeer + 'static>(&mut self) {
-        self.register(PeerRoleId::typed::<T>(), T::builder);
+        self.register(T::role_id(), T::builder);
     }
 
     pub fn create(
