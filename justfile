@@ -13,7 +13,7 @@ test:
 miri:
   cargo +nightly miri test --manifest-path ./crates/_/Cargo.toml -- --nocapture
   # cargo +nightly miri test --manifest-path ./crates/mock/Cargo.toml -- --nocapture
-  # cargo +nightly miri test --manifest-path ./crates/tcp/Cargo.toml -- --nocapture
+  # cargo +nightly miri test --manifest-path ./crates/socket/Cargo.toml -- --nocapture
   
 clippy:
   cargo clippy --all --all-features
@@ -39,7 +39,7 @@ list-outdated:
 update:
   cargo update --manifest-path ./crates/_/Cargo.toml --aggressive
   cargo update --manifest-path ./crates/mock/Cargo.toml --aggressive
-  cargo update --manifest-path ./crates/tcp/Cargo.toml --aggressive
+  cargo update --manifest-path ./crates/socket/Cargo.toml --aggressive
   
 # book:
 #   mdbook build book
@@ -55,4 +55,4 @@ publish:
   sleep 1
   cargo publish --no-verify --manifest-path ./crates/mock/Cargo.toml
   sleep 1
-  cargo publish --no-verify --manifest-path ./crates/tcp/Cargo.toml
+  cargo publish --no-verify --manifest-path ./crates/socket/Cargo.toml
