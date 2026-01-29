@@ -1,17 +1,19 @@
 [package]
-name = "tehuti-mock"
+name = "tehuti-socket"
 version = "0.6.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
-description = "Mock testing engine for Tehuti communication system."
+description = "Socket engine for Tehuti communication system."
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/PsichiX/tehuti"
 repository = "https://github.com/PsichiX/tehuti"
-documentation = "https://docs.rs/tehuti-mock"
+documentation = "https://docs.rs/tehuti-socket"
 readme = "../../README.md"
 
 [dependencies]
 tehuti = { version = "0.6", path = "../_" }
 tracing = "0.1"
 tracing-subscriber = "0.3"
-rand = "0.9"
+
+[dev-dependencies]
+tehuti-mock = { version = "0.6", path = "../mock" }

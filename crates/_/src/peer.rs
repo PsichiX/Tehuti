@@ -69,13 +69,16 @@ pub struct Peer {
     receivers: BTreeMap<ChannelId, Box<dyn Any + Send>>,
     senders: BTreeMap<ChannelId, Box<dyn Any + Send>>,
     meeting_sender: Sender<MeetingUserEvent>,
+    destroy_on_drop: bool,
 }
 
 impl Drop for Peer {
     fn drop(&mut self) {
-        let _ = self
-            .meeting_sender
-            .send(MeetingUserEvent::PeerDestroy(self.info.peer_id));
+        if self.destroy_on_drop {
+            let _ = self
+                .meeting_sender
+                .send(MeetingUserEvent::PeerDestroy(self.info.peer_id));
+        }
     }
 }
 
@@ -86,10 +89,12 @@ impl Peer {
             receivers: Default::default(),
             senders: Default::default(),
             meeting_sender,
+            destroy_on_drop: true,
         }
     }
 
-    pub fn destructure(self) -> PeerDestructurer {
+    pub fn destructure(mut self) -> PeerDestructurer {
+        self.destroy_on_drop = false;
         PeerDestructurer::new(self)
     }
 
@@ -440,6 +445,10 @@ impl PeerDestructurer {
         Self { peer }
     }
 
+    pub fn info(&self) -> &PeerInfo {
+        self.peer.info()
+    }
+
     pub fn read<Message: Send + 'static>(
         &mut self,
         channel_id: ChannelId,
@@ -514,6 +523,11 @@ impl PeerFactory {
         role_id: PeerRoleId,
         builder_fn: impl Fn(PeerBuilder) -> PeerBuilder + Send + Sync + 'static,
     ) {
+        tracing::event!(
+            target: "tehuti::peer",
+            tracing::Level::DEBUG,
+            "Registering peer role id {}", role_id
+        );
         self.registry.insert(role_id, Arc::new(builder_fn));
     }
 

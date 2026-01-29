@@ -385,7 +385,7 @@ impl MockMeeting {
                 .unwrap();
             let mut peers = BTreeMap::<PeerId, EnginePeerDescriptor>::new();
 
-            loop {
+            'main: loop {
                 if termination_receiver.try_recv().is_some() {
                     tracing::event!(
                         target: "tehuti::mock::meeting",
@@ -499,7 +499,7 @@ impl MockMeeting {
                                 id,
                                 std::thread::current().id()
                             );
-                            break;
+                            break 'main;
                         }
                         MeetingEngineEvent::PeerCreated(descriptor) => {
                             if let Entry::Vacant(entry) = peers.entry(descriptor.info.peer_id) {
@@ -811,9 +811,11 @@ mod tests {
         // them bounded, so when new message arrives and there is no more space,
         // oldest message is dropped.
         let factory = Arc::new(PeerFactory::default().with(PeerRoleId::new(0), |builder| {
-            builder
-                .bind_read::<String, String>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
-                .bind_write::<String, String>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
+            builder.bind_read_write::<String, String>(
+                ChannelId::new(0),
+                ChannelMode::ReliableOrdered,
+                None,
+            )
         }));
 
         // Create network that will transmit messages between machines.

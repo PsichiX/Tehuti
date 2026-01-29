@@ -114,6 +114,45 @@ impl std::fmt::Debug for ProtocolPacketFrame {
     }
 }
 
+/// Protocol frames are either control frames or packet frames.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ProtocolFrame {
+    Control(ProtocolControlFrame),
+    Packet(ProtocolPacketFrame),
+}
+
+impl ProtocolFrame {
+    pub fn write(&self, stream: &mut dyn Write) -> Result<()> {
+        match self {
+            ProtocolFrame::Control(control_frame) => {
+                stream.write_all(&[1u8])?;
+                control_frame.write(stream)?;
+            }
+            ProtocolFrame::Packet(packet_frame) => {
+                stream.write_all(&[2u8])?;
+                packet_frame.write(stream)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn read(stream: &mut dyn Read) -> Result<ProtocolFrame> {
+        let mut frame_type = [0u8; std::mem::size_of::<u8>()];
+        stream.read_exact(&mut frame_type)?;
+        match frame_type[0] {
+            1 => {
+                let control_frame = ProtocolControlFrame::read(stream)?;
+                Ok(ProtocolFrame::Control(control_frame))
+            }
+            2 => {
+                let packet_frame = ProtocolPacketFrame::read(stream)?;
+                Ok(ProtocolFrame::Packet(packet_frame))
+            }
+            _ => Err(Error::new(ErrorKind::InvalidData, "Unknown frame type")),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

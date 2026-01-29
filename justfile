@@ -45,6 +45,9 @@ update:
 # book-dev:
 #   mdbook watch book --open
 
+sample NAME:
+  cargo run --manifest-path ./crates/samples/Cargo.toml --example {{NAME}}
+
 publish:
   cargo publish --no-verify --manifest-path ./crates/_/Cargo.toml
   sleep 1

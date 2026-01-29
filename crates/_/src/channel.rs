@@ -38,6 +38,9 @@ impl std::fmt::Display for ChannelId {
     }
 }
 
+/// Mode of the channel, defining its reliability and ordering guarantees.
+/// IMPORTANT: It is only a hint for the underlying transport, actual guarantees
+/// depend on the transport used!
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ChannelMode {
     ReliableOrdered,
