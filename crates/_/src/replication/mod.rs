@@ -6,11 +6,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     error::Error,
     hash::{Hash, Hasher},
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     marker::PhantomData,
     ops::{Deref, DerefMut},
+    sync::Mutex,
 };
 
+pub type BufferWrite = Cursor<Vec<u8>>;
+pub type BufferRead<'a> = Cursor<&'a [u8]>;
 pub type HashReplicated<T> = Replicated<HashRep, T>;
 pub type MutReplicated<T> = Replicated<MutRep, T>;
 pub type ManReplicated<T> = Replicated<ManRep, T>;
@@ -85,16 +88,16 @@ impl<T: Replicable> ReplicationPolicy<T> for ManRep {
 }
 
 pub trait Replicable: Sized {
-    fn collect_changes(&self, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>>;
-    fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>>;
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>>;
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>>;
 }
 
 impl Replicable for () {
-    fn collect_changes(&self, _: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, _: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    fn apply_changes(&mut self, _: &mut dyn Read) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, _: &mut BufferRead) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 }
@@ -106,7 +109,7 @@ macro_rules! impl_replicable_tuple {
         where
             $( $id: Replicable ),+
         {
-            fn collect_changes(&self, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+            fn collect_changes(&self, buffer: &mut $crate::replication::BufferWrite) -> Result<(), Box<dyn Error>> {
                 let ( $( $id, )+ ) = self;
                 $(
                     $id.collect_changes(buffer)?;
@@ -114,7 +117,7 @@ macro_rules! impl_replicable_tuple {
                 Ok(())
             }
 
-            fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>> {
+            fn apply_changes(&mut self, buffer: &mut $crate::replication::BufferRead) -> Result<(), Box<dyn Error>> {
                 let ( $( $id, )+ ) = self;
                 $(
                     $id.apply_changes(buffer)?;
@@ -148,7 +151,7 @@ where
     T: Replicable,
 {
     data: T,
-    meta: P,
+    meta: Mutex<P>,
 }
 
 impl<P, T> Replicated<P, T>
@@ -158,7 +161,7 @@ where
 {
     pub fn new(data: T) -> Self {
         Self {
-            meta: P::default(),
+            meta: Mutex::new(P::default()),
             data,
         }
     }
@@ -167,11 +170,13 @@ where
         self.data
     }
 
-    pub fn collect_changes(
-        this: &mut Self,
-        buffer: &mut dyn Write,
-    ) -> Result<bool, Box<dyn Error>> {
-        if this.meta.detect_change(&this.data) {
+    pub fn collect_changes(this: &Self, buffer: &mut BufferWrite) -> Result<bool, Box<dyn Error>> {
+        if this
+            .meta
+            .lock()
+            .map_err(|_| "Replicated meta lock error")?
+            .detect_change(&this.data)
+        {
             this.data.collect_changes(buffer)?;
             Ok(true)
         } else {
@@ -179,13 +184,64 @@ where
         }
     }
 
-    pub fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>> {
+    pub fn maybe_collect_changes<const TAG: u8>(
+        this: &Self,
+        buffer: &mut BufferWrite,
+    ) -> Result<bool, Box<dyn Error>> {
+        if this
+            .meta
+            .lock()
+            .map_err(|_| "Replicated meta lock error")?
+            .detect_change(&this.data)
+        {
+            let mut temp_buffer = Cursor::new(Vec::new());
+            this.data.collect_changes(&mut temp_buffer)?;
+            let data_length = temp_buffer.get_ref().len() as u64;
+            buffer.write_all(&[TAG])?;
+            leb128::write::unsigned(buffer, data_length)?;
+            buffer.write_all(&temp_buffer.into_inner())?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
         self.data.apply_changes(buffer)?;
         Ok(())
     }
 
+    pub fn maybe_apply_changes<const TAG: u8>(
+        &mut self,
+        buffer: &mut BufferRead,
+    ) -> Result<(), Box<dyn Error>> {
+        let position = buffer.position();
+        let mut tag_buf = [0u8; 1];
+        buffer.read_exact(&mut tag_buf)?;
+        if tag_buf[0] != TAG {
+            buffer.set_position(position);
+            return Ok(());
+        }
+        let data_length = leb128::read::unsigned(buffer)?;
+        self.data.apply_changes(buffer)?;
+        let new_position = buffer.position();
+        if (new_position - position - 1) != data_length {
+            buffer.set_position(position);
+            return Err(format!(
+                "Data length mismatch: expected {}, got {}",
+                data_length,
+                new_position - position - 1
+            )
+            .into());
+        }
+        Ok(())
+    }
+
     pub fn mark_changed(&mut self) {
-        self.meta = P::default();
+        *self
+            .meta
+            .lock()
+            .unwrap_or_else(|_| panic!("Replicated meta lock error")) = P::default();
     }
 }
 
@@ -212,7 +268,7 @@ where
         D: Deserializer<'de>,
     {
         let data = T::deserialize(deserializer)?;
-        let meta = P::default();
+        let meta = Mutex::new(P::default());
         Ok(Self { data, meta })
     }
 }
@@ -275,7 +331,7 @@ where
     fn default() -> Self {
         let data = T::default();
         Self {
-            meta: P::default(),
+            meta: Mutex::new(P::default()),
             data,
         }
     }
@@ -288,7 +344,7 @@ where
 {
     fn clone(&self) -> Self {
         Self {
-            meta: P::default(),
+            meta: Mutex::new(P::default()),
             data: self.data.clone(),
         }
     }
@@ -359,7 +415,10 @@ where
     T: Replicable,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.meta.on_mutation(&self.data);
+        self.meta
+            .lock()
+            .unwrap_or_else(|_| panic!("Replicated meta lock error"))
+            .on_mutation(&self.data);
         &mut self.data
     }
 }
@@ -405,11 +464,11 @@ impl<'de, T: Deserialize<'de>, C: Codec<Value = T>> Deserialize<'de> for CodecRe
 }
 
 impl<T, C: Codec<Value = T>> Replicable for CodecRep<T, C> {
-    fn collect_changes(&self, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
         C::encode(&self.data, buffer)
     }
 
-    fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
         self.data = C::decode(buffer)?;
         Ok(())
     }
@@ -509,9 +568,12 @@ impl<T, C: Codec<Value = T>> DerefMut for CodecRep<T, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::postcard::PostcardCodec;
+    use crate::{
+        codec::postcard::PostcardCodec,
+        replication::primitives::{RepF32, RepI32},
+    };
     use serde::{Deserialize, Serialize};
-    use std::error::Error;
+    use std::{error::Error, io::Cursor};
 
     pub type HashPostcardReplicated<T> = HashCodecReplicated<T, PostcardCodec<T>>;
     pub type MutPostcardReplicated<T> = MutCodecReplicated<T, PostcardCodec<T>>;
@@ -523,19 +585,15 @@ mod tests {
     }
 
     impl Replicable for Foo {
-        fn collect_changes(&self, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
-            buffer.write_all(&self.a.to_le_bytes())?;
-            buffer.write_all(&[self.b as u8])?;
+        fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+            self.a.collect_changes(buffer)?;
+            self.b.collect_changes(buffer)?;
             Ok(())
         }
 
-        fn apply_changes(&mut self, buffer: &mut dyn Read) -> Result<(), Box<dyn Error>> {
-            let mut buf = [0u8; std::mem::size_of::<u32>()];
-            buffer.read_exact(&mut buf)?;
-            self.a = u32::from_le_bytes(buf);
-            let mut bool_buf = [0u8; std::mem::size_of::<u8>()];
-            buffer.read_exact(&mut bool_buf)?;
-            self.b = bool_buf[0] != 0;
+        fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+            self.a.apply_changes(buffer)?;
+            self.b.apply_changes(buffer)?;
             Ok(())
         }
     }
@@ -546,112 +604,133 @@ mod tests {
         foo: HashPostcardReplicated<Foo>,
     }
 
+    #[derive(Debug, Clone, PartialEq, Hash)]
+    struct Zee {
+        a: HashReplicated<RepI32>,
+        b: HashReplicated<RepF32>,
+    }
+
+    impl Replicable for Zee {
+        fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+            Replicated::maybe_collect_changes::<0>(&self.a, buffer)?;
+            Replicated::maybe_collect_changes::<1>(&self.b, buffer)?;
+            Ok(())
+        }
+
+        fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+            Replicated::maybe_apply_changes::<0>(&mut self.a, buffer)?;
+            Replicated::maybe_apply_changes::<1>(&mut self.b, buffer)?;
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_hashed_replication() {
-        let mut buffer = Vec::new();
-
         let mut data = HashReplicated::new(Foo { a: 42, b: false });
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 5);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 5);
 
-        buffer.clear();
-        assert!(!Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 0);
+        let mut buffer = Cursor::default();
+        assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 0);
 
         data.a = 100;
         data.b = true;
 
-        buffer.clear();
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 5);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 5);
 
         let mut data2 = HashReplicated::new(Foo { a: 42, b: false });
-        Replicated::apply_changes(&mut data2, &mut buffer.as_slice()).unwrap();
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 100);
         assert!(data2.b);
     }
 
     #[test]
     fn test_mutated_replication() {
-        let mut buffer = Vec::new();
-
         let mut data = MutReplicated::new(Foo { a: 42, b: false });
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 5);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 5);
 
-        buffer.clear();
-        assert!(!Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 0);
+        let mut buffer = Cursor::default();
+        assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 0);
 
         data.a = 100;
 
-        buffer.clear();
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 5);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 5);
 
         let mut data2 = MutReplicated::new(Foo { a: 42, b: false });
-        Replicated::apply_changes(&mut data2, &mut buffer.as_slice()).unwrap();
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 100);
         assert!(!data2.b);
     }
 
     #[test]
     fn test_manual_replication() {
-        let mut buffer = Vec::new();
-
         let mut data = ManReplicated::new(Foo { a: 42, b: false });
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 5);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 5);
 
-        buffer.clear();
-        assert!(!Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 0);
-
+        let mut buffer = Cursor::default();
+        assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 0);
         data.b = true;
 
-        buffer.clear();
-        assert!(!Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 0);
+        let mut buffer = Cursor::default();
+        assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 0);
 
         data.mark_changed();
 
-        buffer.clear();
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 5);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 5);
 
         let mut data2 = ManReplicated::new(Foo { a: 42, b: false });
-        Replicated::apply_changes(&mut data2, &mut buffer.as_slice()).unwrap();
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 42);
         assert!(data2.b);
     }
 
     #[test]
     fn test_codec_replication() {
-        let mut buffer = Vec::new();
-
         let mut data = HashPostcardReplicated::<Foo>::new(Foo { a: 42, b: false }.into());
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 10);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 10);
 
-        buffer.clear();
-        assert!(!Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 0);
+        let mut buffer = Cursor::default();
+        assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 0);
 
         data.a = 100;
-        buffer.clear();
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 10);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 10);
 
         let mut data2 = HashPostcardReplicated::<Foo>::new(Foo { a: 42, b: false }.into());
-        Replicated::apply_changes(&mut data2, &mut buffer.as_slice()).unwrap();
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 100);
         assert!(!data2.b);
     }
 
     #[test]
     fn test_nested_replication() {
-        let mut buffer = Vec::new();
-
         let mut data = MutPostcardReplicated::<Bar>::new(
             Bar {
                 a: 4.2,
@@ -660,15 +739,20 @@ mod tests {
             .into(),
         );
 
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 14);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 14);
+
+        let mut buffer = Cursor::default();
+        assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 0);
 
         data.a = 2.71;
         data.foo.a = 100;
 
-        buffer.clear();
-        assert!(Replicated::collect_changes(&mut data, &mut buffer).unwrap());
-        assert_eq!(buffer.len(), 14);
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 14);
 
         let mut data2 = MutPostcardReplicated::<Bar>::new(
             Bar {
@@ -677,9 +761,39 @@ mod tests {
             }
             .into(),
         );
-        Replicated::apply_changes(&mut data2, &mut buffer.as_slice()).unwrap();
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 2.71);
         assert_eq!(data2.foo.a, 100);
         assert!(!data2.foo.b);
+    }
+
+    #[test]
+    fn test_partial_replication() {
+        let mut data = HashReplicated::new(Zee {
+            a: HashReplicated::new(RepI32(10)),
+            b: HashReplicated::new(RepF32(4.2)),
+        });
+
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 9);
+
+        let mut buffer = Cursor::default();
+        assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 0);
+
+        **data.a = 20;
+
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 3);
+
+        **data.b = 0.0;
+
+        let mut buffer = Cursor::default();
+        assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
+        assert_eq!(buffer.get_ref().len(), 6);
     }
 }

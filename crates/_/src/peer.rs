@@ -427,7 +427,7 @@ impl PeerBuilder {
 }
 
 pub trait TypedPeer {
-    fn role_id() -> PeerRoleId;
+    const ROLE_ID: PeerRoleId;
 
     fn builder(builder: PeerBuilder) -> PeerBuilder {
         builder
@@ -543,7 +543,7 @@ impl PeerFactory {
     }
 
     pub fn register_typed<T: TypedPeer + 'static>(&mut self) {
-        self.register(T::role_id(), T::builder);
+        self.register(T::ROLE_ID, T::builder);
     }
 
     pub fn create(

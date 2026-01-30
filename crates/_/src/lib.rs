@@ -41,11 +41,12 @@ pub mod replication;
 pub mod rpc;
 
 pub mod third_party {
+    pub use leb128;
     pub use tracing;
     pub use typid;
 }
 
-pub(crate) fn hash<T: std::hash::Hash>(data: &T) -> u64 {
+pub fn hash<T: std::hash::Hash>(data: &T) -> u64 {
     use std::hash::Hasher;
 
     let mut hasher = seahash::SeaHasher::default();

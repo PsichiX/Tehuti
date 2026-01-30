@@ -282,13 +282,13 @@ impl Replica {
 
 pub struct ReplicaCollectChanges<'a> {
     replica: &'a Replica,
-    buffer: Option<Vec<u8>>,
+    buffer: Option<Cursor<Vec<u8>>>,
 }
 
 impl<'a> Drop for ReplicaCollectChanges<'a> {
     fn drop(&mut self) {
         if let Some(sender) = &self.replica.change_sender {
-            let _ = sender.send(self.buffer.take().unwrap_or_default());
+            let _ = sender.send(self.buffer.take().unwrap_or_default().into_inner());
         }
     }
 }
@@ -314,7 +314,7 @@ impl<'a> ReplicaCollectChanges<'a> {
 }
 
 pub struct ReplicaApplyChanges {
-    buffer: Option<Cursor<Vec<u8>>>,
+    buffer: Option<Vec<u8>>,
 }
 
 impl ReplicaApplyChanges {
@@ -322,7 +322,7 @@ impl ReplicaApplyChanges {
         if let Some(receiver) = &replica.change_receiver {
             if let Some(buffer) = receiver.try_recv() {
                 Ok(Some(Self {
-                    buffer: Some(Cursor::new(buffer)),
+                    buffer: Some(buffer),
                 }))
             } else {
                 Ok(None)
@@ -338,7 +338,7 @@ impl ReplicaApplyChanges {
         T: Replicable,
     {
         if let Some(buffer) = &mut self.buffer {
-            Replicated::apply_changes(replicated, buffer)?;
+            Replicated::apply_changes(replicated, &mut Cursor::new(buffer))?;
         }
         Ok(())
     }

@@ -475,6 +475,8 @@ mod tests {
     }
 
     impl TypedPeer for Chatter {
+        const ROLE_ID: PeerRoleId = PeerRoleId::new(0);
+
         fn builder(builder: PeerBuilder) -> PeerBuilder {
             builder.bind_read_write::<String, String>(
                 ChannelId::new(0),

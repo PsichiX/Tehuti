@@ -9,7 +9,6 @@ use tehuti::{
 use tehuti_mock::mock_recv_matching;
 
 const ADDRESS: &str = "127.0.0.1:8888";
-const CHAT_ROLE: PeerRoleId = PeerRoleId::new(0);
 const MESSAGE_CHANNEL: ChannelId = ChannelId::new(0);
 
 /// Simple example demonstrating a server and client exchanging messages
@@ -18,10 +17,10 @@ fn main() {
     println!("Are you hosting a server? (y/n): ");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
+    let server = input.trim().to_lowercase() == "y";
 
     let factory = PeerFactory::default().with_typed::<ChatRole>();
 
-    let server = input.trim().to_lowercase() == "y";
     if server {
         tcp_example_server(ADDRESS, factory.into(), app).unwrap();
     } else {
@@ -36,7 +35,7 @@ fn app(is_server: bool, meeting: MeetingInterface, terminate_sender: Sender<()>)
             .sender
             .send(MeetingUserEvent::PeerCreate(
                 PeerId::new(0),
-                PeerRoleId::new(0),
+                ChatRole::ROLE_ID,
             ))
             .unwrap();
     }
@@ -89,9 +88,7 @@ struct ChatRole {
 }
 
 impl TypedPeer for ChatRole {
-    fn role_id() -> PeerRoleId {
-        CHAT_ROLE
-    }
+    const ROLE_ID: PeerRoleId = PeerRoleId::new(0);
 
     fn builder(builder: tehuti::peer::PeerBuilder) -> tehuti::peer::PeerBuilder {
         builder.bind_read_write::<String, String>(
