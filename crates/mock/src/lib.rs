@@ -7,30 +7,28 @@ use std::{
     time::{Duration, Instant},
 };
 use tehuti::{
-    engine::EnginePeerDescriptor,
+    engine::{EngineId, EnginePeerDescriptor},
     event::{Duplex, Sender, unbounded},
+    hash,
     meeting::{MeetingEngineEvent, MeetingInterface, MeetingInterfaceResult},
     peer::{PeerFactory, PeerId},
-    protocol::{ProtocolControlFrame, ProtocolPacketFrame},
+    protocol::{ProtocolControlFrame, ProtocolFrame, ProtocolPacketFrame},
 };
 use tracing::level_filters::LevelFilter;
 
+pub fn machine_id_to_engine_id(id: &str) -> EngineId {
+    EngineId::new(hash(&id) as u128)
+}
+
 #[derive(Debug, Clone)]
-enum MockNetworkMessage {
-    ControlFrame {
-        delay: Duration,
-        frame: ProtocolControlFrame,
-    },
-    PacketFrame {
-        delay: Duration,
-        frame: ProtocolPacketFrame,
-    },
+struct NetworkFrame {
+    delay: Duration,
+    frame: ProtocolFrame,
 }
 
 struct MockNetworkPortNode {
-    engine_control: Duplex<ProtocolControlFrame>,
-    engine_packet: Duplex<ProtocolPacketFrame>,
-    mailbox: Vec<MockNetworkMessage>,
+    engine_frames: Duplex<ProtocolFrame>,
+    mailbox: Vec<NetworkFrame>,
     config: MockNetworkPortConfig,
 }
 
@@ -114,17 +112,12 @@ impl MockNetwork {
                             break 'main;
                         }
                         MockNetworkRequest::CreatePort { id, config, reply } => {
-                            let (engine_control, network_control) = Duplex::crossing_unbounded();
-                            let (engine_packet, network_packet) = Duplex::crossing_unbounded();
-                            let result = MockNetworkPort {
-                                network_control,
-                                network_packet,
-                            };
+                            let (engine_frames, network_frames) = Duplex::crossing_unbounded();
+                            let result = MockNetworkPort { network_frames };
                             nodes.insert(
                                 id.to_owned(),
                                 MockNetworkPortNode {
-                                    engine_control,
-                                    engine_packet,
+                                    engine_frames,
                                     mailbox: Default::default(),
                                     config,
                                 },
@@ -167,7 +160,7 @@ impl MockNetwork {
                 let messages = nodes
                     .iter()
                     .flat_map(|(id, node)| {
-                        node.engine_control
+                        node.engine_frames
                             .receiver
                             .iter()
                             .filter(|_| !node.config.should_lose_packet())
@@ -175,40 +168,33 @@ impl MockNetwork {
                                 tracing::event!(
                                     target: "tehuti::mock::network",
                                     tracing::Level::TRACE,
-                                    "Mock network received control frame {:?} from node '{}'",
+                                    "Mock network received frame {:?} from node '{}'",
                                     frame,
                                     id.to_owned()
                                 );
-                                (id.to_owned(), MockNetworkMessage::ControlFrame {
-                                    delay: node.config.latency(),
-                                    frame,
-                                })
+                                (
+                                    id.to_owned(),
+                                    NetworkFrame {
+                                        delay: node.config.latency(),
+                                        frame,
+                                    },
+                                )
                             })
-                            .chain(
-                                node.engine_packet
-                                    .receiver
-                                    .iter()
-                                    .filter(|_| !node.config.should_lose_packet())
-                                    .map(|frame| {
-                                        tracing::event!(
-                                            target: "tehuti::mock::network",
-                                            tracing::Level::TRACE,
-                                            "Mock network received packet frame {:?} from node '{}'",
-                                            frame,
-                                            id.to_owned()
-                                        );
-                                        (id.to_owned(), MockNetworkMessage::PacketFrame {
-                                            delay: node.config.latency(),
-                                            frame,
-                                        })
-                                    }),
-                            )
                     })
                     .collect::<Vec<_>>();
 
                 // Distributing collected messages to nodes mailboxes.
                 for (source, message) in messages {
                     for (target, node) in &mut nodes {
+                        if let ProtocolFrame::Packet(frame) = &message.frame
+                            && !frame.data.recepients.is_empty()
+                            && !frame
+                                .data
+                                .recepients
+                                .contains(&machine_id_to_engine_id(target))
+                        {
+                            continue;
+                        }
                         if &source != target {
                             node.mailbox.push(message.clone());
                         }
@@ -218,56 +204,27 @@ impl MockNetwork {
                 // Forwarding messages from node mailbox to engine.
                 for (id, node) in &mut nodes {
                     let mut remaining_mailbox = Vec::new();
-                    for message in node.mailbox.drain(..) {
-                        match message {
-                            MockNetworkMessage::ControlFrame { mut delay, frame } => {
-                                delay = delay.saturating_sub(delta_time);
-                                if delay <= Duration::ZERO {
-                                    tracing::event!(
-                                        target: "tehuti::mock::network",
-                                        tracing::Level::TRACE,
-                                        "Mock network send control frame {:?} to node '{}'",
-                                        frame,
-                                        id
-                                    );
-                                    if let Err(err) = node.engine_control.sender.send(frame) {
-                                        tracing::event!(
-                                            target: "tehuti::mock::network",
-                                            tracing::Level::ERROR,
-                                            "Mock network failed to send control frame to node '{}': {}",
-                                            id,
-                                            err
-                                        );
-                                    }
-                                } else {
-                                    remaining_mailbox
-                                        .push(MockNetworkMessage::ControlFrame { delay, frame });
-                                }
+                    for NetworkFrame { mut delay, frame } in node.mailbox.drain(..) {
+                        delay = delay.saturating_sub(delta_time);
+                        if delay <= Duration::ZERO {
+                            tracing::event!(
+                                target: "tehuti::mock::network",
+                                tracing::Level::TRACE,
+                                "Mock network send frame {:?} to node '{}'",
+                                frame,
+                                id
+                            );
+                            if let Err(err) = node.engine_frames.sender.send(frame) {
+                                tracing::event!(
+                                    target: "tehuti::mock::network",
+                                    tracing::Level::ERROR,
+                                    "Mock network failed to send frame to node '{}': {}",
+                                    id,
+                                    err
+                                );
                             }
-                            MockNetworkMessage::PacketFrame { mut delay, frame } => {
-                                delay = delay.saturating_sub(delta_time);
-                                if delay <= Duration::ZERO {
-                                    tracing::event!(
-                                        target: "tehuti::mock::network",
-                                        tracing::Level::TRACE,
-                                        "Mock network send packet frame {:?} to node '{}'",
-                                        frame,
-                                        id
-                                    );
-                                    if let Err(err) = node.engine_packet.sender.send(frame) {
-                                        tracing::event!(
-                                            target: "tehuti::mock::network",
-                                            tracing::Level::ERROR,
-                                            "Mock network failed to send packet frame to node '{}': {}",
-                                            id,
-                                            err
-                                        );
-                                    }
-                                } else {
-                                    remaining_mailbox
-                                        .push(MockNetworkMessage::PacketFrame { delay, frame });
-                                }
-                            }
+                        } else {
+                            remaining_mailbox.push(NetworkFrame { delay, frame });
                         }
                     }
                     node.mailbox.extend(remaining_mailbox);
@@ -335,8 +292,7 @@ impl MockNetwork {
 }
 
 pub struct MockNetworkPort {
-    pub network_control: Duplex<ProtocolControlFrame>,
-    pub network_packet: Duplex<ProtocolPacketFrame>,
+    pub network_frames: Duplex<ProtocolFrame>,
 }
 
 struct MockMeeting {
@@ -397,9 +353,12 @@ impl MockMeeting {
                     break;
                 }
 
-                for frame in port.network_control.receiver.iter() {
+                for frame in port.network_frames.receiver.iter() {
                     match frame {
-                        ProtocolControlFrame::CreatePeer(peer_id, peer_role_id) => {
+                        ProtocolFrame::Control(ProtocolControlFrame::CreatePeer(
+                            peer_id,
+                            peer_role_id,
+                        )) => {
                             outside_engine
                                 .sender
                                 .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
@@ -408,7 +367,7 @@ impl MockMeeting {
                                 })
                                 .unwrap();
                         }
-                        ProtocolControlFrame::DestroyPeer(peer_id) => {
+                        ProtocolFrame::Control(ProtocolControlFrame::DestroyPeer(peer_id)) => {
                             outside_engine
                                 .sender
                                 .send(MeetingEngineEvent::PeerLeft(peer_id))
@@ -417,11 +376,43 @@ impl MockMeeting {
                                 })
                                 .unwrap();
                         }
+                        ProtocolFrame::Packet(frame) => {
+                            if let Some(peer) = peers.get(&frame.peer_id) {
+                                if let Some(sender) = peer.packet_senders.get(&frame.channel_id) {
+                                    sender
+                                        .sender
+                                        .send(frame.data)
+                                        .map_err(|err| {
+                                            format!("Machine packet sender error: {err}")
+                                        })
+                                        .unwrap();
+                                } else {
+                                    tracing::event!(
+                                        target: "tehuti::mock::meeting",
+                                        tracing::Level::WARN,
+                                        "Mock meeting {} got packet frame for unknown channel {:?} of peer {:?} in thread {:?}",
+                                        id,
+                                        frame.channel_id,
+                                        frame.peer_id,
+                                        std::thread::current().id()
+                                    );
+                                }
+                            } else {
+                                tracing::event!(
+                                    target: "tehuti::mock::meeting",
+                                    tracing::Level::WARN,
+                                    "Mock meeting {} got packet frame for unknown peer {:?} in thread {:?}",
+                                    id,
+                                    frame.peer_id,
+                                    std::thread::current().id()
+                                );
+                            }
+                        }
                         _ => {
                             tracing::event!(
                                 target: "tehuti::mock::meeting",
                                 tracing::Level::WARN,
-                                "Mock meeting {} got unhandled control frame: {:?} in thread {:?}",
+                                "Mock meeting {} got unhandled frame: {:?} in thread {:?}",
                                 id,
                                 frame,
                                 std::thread::current().id()
@@ -430,47 +421,16 @@ impl MockMeeting {
                     }
                 }
 
-                for frame in port.network_packet.receiver.iter() {
-                    if let Some(peer) = peers.get(&frame.peer_id) {
-                        if let Some(sender) = peer.packet_senders.get(&frame.channel_id) {
-                            sender
-                                .sender
-                                .send(frame.data)
-                                .map_err(|err| format!("Machine packet sender error: {err}"))
-                                .unwrap();
-                        } else {
-                            tracing::event!(
-                                target: "tehuti::mock::meeting",
-                                tracing::Level::WARN,
-                                "Mock meeting {} got packet frame for unknown channel {:?} of peer {:?} in thread {:?}",
-                                id,
-                                frame.channel_id,
-                                frame.peer_id,
-                                std::thread::current().id()
-                            );
-                        }
-                    } else {
-                        tracing::event!(
-                            target: "tehuti::mock::meeting",
-                            tracing::Level::WARN,
-                            "Mock meeting {} got packet frame for unknown peer {:?} in thread {:?}",
-                            id,
-                            frame.peer_id,
-                            std::thread::current().id()
-                        );
-                    }
-                }
-
                 for peer in peers.values() {
                     for (channel_id, receiver) in &peer.packet_receivers {
                         for data in receiver.receiver.iter() {
-                            port.network_packet
+                            port.network_frames
                                 .sender
-                                .send(ProtocolPacketFrame {
+                                .send(ProtocolFrame::Packet(ProtocolPacketFrame {
                                     peer_id: peer.info.peer_id,
                                     channel_id: *channel_id,
                                     data,
-                                })
+                                }))
                                 .map_err(|err| format!("Network port packet sender error: {err}"))
                                 .unwrap();
                         }
@@ -504,11 +464,13 @@ impl MockMeeting {
                         MeetingEngineEvent::PeerCreated(descriptor) => {
                             if let Entry::Vacant(entry) = peers.entry(descriptor.info.peer_id) {
                                 if !descriptor.info.remote {
-                                    port.network_control
+                                    port.network_frames
                                         .sender
-                                        .send(ProtocolControlFrame::CreatePeer(
-                                            descriptor.info.peer_id,
-                                            descriptor.info.role_id,
+                                        .send(ProtocolFrame::Control(
+                                            ProtocolControlFrame::CreatePeer(
+                                                descriptor.info.peer_id,
+                                                descriptor.info.role_id,
+                                            ),
                                         ))
                                         .map_err(|err| {
                                             format!("Network control sender error: {err}")
@@ -537,9 +499,11 @@ impl MockMeeting {
                         }
                         MeetingEngineEvent::PeerDestroyed(peer_id) => {
                             if peers.contains_key(&peer_id) {
-                                port.network_control
+                                port.network_frames
                                     .sender
-                                    .send(ProtocolControlFrame::DestroyPeer(peer_id))
+                                    .send(ProtocolFrame::Control(
+                                        ProtocolControlFrame::DestroyPeer(peer_id),
+                                    ))
                                     .map_err(|err| format!("Network control sender error: {err}"))
                                     .unwrap();
                                 tracing::event!(
@@ -779,15 +743,15 @@ mod tests {
     use super::*;
     use std::{error::Error, sync::Arc};
     use tehuti::{
-        channel::{ChannelId, ChannelMode},
+        channel::{ChannelId, ChannelMode, Dispatch},
         event::Receiver,
         meeting::MeetingUserEvent,
         peer::{PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
     };
 
     struct Chatter {
-        pub sender: Sender<String>,
-        pub receiver: Receiver<String>,
+        pub sender: Sender<Dispatch<String>>,
+        pub receiver: Receiver<Dispatch<String>>,
     }
 
     impl TypedPeer for Chatter {
@@ -862,7 +826,7 @@ mod tests {
         // Send message from peer on machine A to peer on machine B.
         peer_a
             .sender
-            .send("Hello from machine A".to_owned())
+            .send("Hello from machine A".to_owned().into())
             .unwrap();
 
         // Receive message on peer on machine B.
@@ -870,7 +834,7 @@ mod tests {
             .receiver
             .recv_blocking_timeout(Duration::from_secs(1))
             .unwrap();
-        assert_eq!(&msg, "Hello from machine A");
+        assert_eq!(&msg.message, "Hello from machine A");
 
         // Don't let important stuff drop too early.
         drop(meeting_a);

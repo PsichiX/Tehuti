@@ -5,5 +5,3 @@ Cargo.lock
 *.sh
 *.bat
 *.log
-
-crates/samples/examples/02_replication.rs

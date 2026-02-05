@@ -1,5 +1,6 @@
 pub mod containers;
 pub mod primitives;
+pub mod rpc;
 
 use crate::codec::Codec;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

@@ -1,7 +1,11 @@
 use crate::{
     codec::Codec,
-    event::{Duplex, Receiver, Sender},
+    engine::EngineId,
+    event::{Receiver, Sender},
+    protocol::{PacketRecepients, ProtocolPacketData},
+    replication::{BufferRead, BufferWrite, Replicable},
 };
+use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
     error::Error,
@@ -11,7 +15,7 @@ use std::{
     task::{Context, Poll},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChannelId(u64);
 
 impl ChannelId {
@@ -32,23 +36,65 @@ impl ChannelId {
     }
 }
 
+impl Replicable for ChannelId {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        self.0.collect_changes(buffer)?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        self.0.apply_changes(buffer)?;
+        Ok(())
+    }
+}
+
 impl std::fmt::Display for ChannelId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "#channel:{}", self.0)
     }
 }
 
+pub struct Dispatch<Message: Send + 'static> {
+    pub message: Message,
+    pub recepients: PacketRecepients,
+}
+
+impl<Message: Send + 'static> Dispatch<Message> {
+    pub fn new(message: Message) -> Self {
+        Self {
+            message,
+            recepients: Default::default(),
+        }
+    }
+
+    pub fn recepient(mut self, engine_id: EngineId) -> Self {
+        self.recepients.push(engine_id);
+        self
+    }
+
+    pub fn recepients(mut self, engine_ids: impl IntoIterator<Item = EngineId>) -> Self {
+        self.recepients.extend(engine_ids);
+        self
+    }
+}
+
+impl<Message: Send + 'static> From<Message> for Dispatch<Message> {
+    fn from(message: Message) -> Self {
+        Self::new(message)
+    }
+}
+
 /// Mode of the channel, defining its reliability and ordering guarantees.
 /// IMPORTANT: It is only a hint for the underlying transport, actual guarantees
 /// depend on the transport used!
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ChannelMode {
     ReliableOrdered,
     ReliableUnordered,
     Unreliable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ChannelKind {
     Read,
     Write,
@@ -67,12 +113,12 @@ pub struct Channel {
 
 impl Channel {
     pub fn read<C: Codec<Value = Message>, Message: Send + 'static>(
-        packet_receiver: Receiver<Vec<u8>>,
-        message_sender: Sender<Message>,
+        packet_receiver: Receiver<ProtocolPacketData>,
+        message_sender: Sender<Dispatch<Message>>,
     ) -> Self {
         struct State<Message: Send + 'static> {
-            packet_receiver: Receiver<Vec<u8>>,
-            message_sender: Sender<Message>,
+            packet_receiver: Receiver<ProtocolPacketData>,
+            message_sender: Sender<Dispatch<Message>>,
         }
 
         let state_pump = Arc::new(Mutex::new(State {
@@ -87,11 +133,15 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
-            if let Some(packet) = state.packet_receiver.try_recv() {
-                let message = C::decode(&mut packet.as_slice())?;
+            if let Some(ProtocolPacketData { data, recepients }) = state.packet_receiver.try_recv()
+            {
+                let message = C::decode(&mut data.as_slice())?;
                 state
                     .message_sender
-                    .send(message)
+                    .send(Dispatch {
+                        message,
+                        recepients,
+                    })
                     .map_err(|err| format!("Pump message sender error: {err}"))?;
                 Ok(true)
             } else {
@@ -106,11 +156,14 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
-            for packet in state.packet_receiver.iter() {
-                let message = C::decode(&mut packet.as_slice())?;
+            for ProtocolPacketData { data, recepients } in state.packet_receiver.iter() {
+                let message = C::decode(&mut data.as_slice())?;
                 state
                     .message_sender
-                    .send(message)
+                    .send(Dispatch {
+                        message,
+                        recepients,
+                    })
                     .map_err(|err| format!("Pump-all message sender error: {err}"))?;
                 count += 1;
             }
@@ -124,12 +177,12 @@ impl Channel {
     }
 
     pub fn write<C: Codec<Value = Message>, Message: Send + 'static>(
-        packet_sender: Sender<Vec<u8>>,
-        message_receiver: Receiver<Message>,
+        packet_sender: Sender<ProtocolPacketData>,
+        message_receiver: Receiver<Dispatch<Message>>,
     ) -> Self {
         struct State<Message: Send + 'static> {
-            packet_sender: Sender<Vec<u8>>,
-            message_receiver: Receiver<Message>,
+            packet_sender: Sender<ProtocolPacketData>,
+            message_receiver: Receiver<Dispatch<Message>>,
         }
 
         let state_pump = Arc::new(Mutex::new(State {
@@ -144,12 +197,16 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast write channel state")?;
-            if let Some(message) = state.message_receiver.try_recv() {
-                let mut packet = Vec::new();
-                C::encode(&message, &mut packet)?;
+            if let Some(Dispatch {
+                message,
+                recepients,
+            }) = state.message_receiver.try_recv()
+            {
+                let mut data = Vec::new();
+                C::encode(&message, &mut data)?;
                 state
                     .packet_sender
-                    .send(packet)
+                    .send(ProtocolPacketData { data, recepients })
                     .map_err(|err| format!("Pump packet sender error: {err}"))?;
                 Ok(true)
             } else {
@@ -164,12 +221,16 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast write channel state")?;
-            for message in state.message_receiver.iter() {
-                let mut packet = Vec::new();
-                C::encode(&message, &mut packet)?;
+            for Dispatch {
+                message,
+                recepients,
+            } in state.message_receiver.iter()
+            {
+                let mut data = Vec::new();
+                C::encode(&message, &mut data)?;
                 state
                     .packet_sender
-                    .send(packet)
+                    .send(ProtocolPacketData { data, recepients })
                     .map_err(|err| format!("Pump-all packet sender error: {err}"))?;
                 count += 1;
             }
@@ -177,56 +238,6 @@ impl Channel {
         });
         Self {
             kind: ChannelKind::Write,
-            pump,
-            pump_all,
-        }
-    }
-
-    pub fn pipe<Message: Send + 'static>(message: Duplex<Message>) -> Self {
-        struct State<Message: Send + 'static> {
-            message: Duplex<Message>,
-        }
-
-        let state_pump = Arc::new(Mutex::new(State { message })) as Arc<Mutex<dyn Any + Send>>;
-        let state_pump_all = state_pump.clone();
-        let pump = Box::new(move || -> Result<bool, Box<dyn Error>> {
-            let mut state = state_pump
-                .lock()
-                .map_err(|_| "Failed to lock pipe channel state")?;
-            let state = state
-                .downcast_mut::<State<Message>>()
-                .ok_or("Failed to downcast pipe channel state")?;
-            if let Some(message) = state.message.receiver.try_recv() {
-                state
-                    .message
-                    .sender
-                    .send(message)
-                    .map_err(|err| format!("Pump pipe sender error: {err}"))?;
-                Ok(true)
-            } else {
-                Ok(false)
-            }
-        });
-        let pump_all = Box::new(move || -> Result<usize, Box<dyn Error>> {
-            let mut count = 0;
-            let mut state = state_pump_all
-                .lock()
-                .map_err(|_| "Failed to lock pipe channel state")?;
-            let state = state
-                .downcast_mut::<State<Message>>()
-                .ok_or("Failed to downcast pipe channel state")?;
-            for message in state.message.receiver.iter() {
-                state
-                    .message
-                    .sender
-                    .send(message)
-                    .map_err(|err| format!("Pump-all pipe sender error: {err}"))?;
-                count += 1;
-            }
-            Ok(count)
-        });
-        Self {
-            kind: ChannelKind::Pipe,
             pump,
             pump_all,
         }
@@ -286,12 +297,12 @@ mod tests {
         let mut channel = Channel::write::<PostcardCodec<TestMessage>, _>(pkt_tx, msg_rx);
 
         let message = TestMessage { id: 42 };
-        msg_tx.send(message).unwrap();
+        msg_tx.send(message.into()).unwrap();
 
         channel.pump().unwrap();
 
         let packet = pkt_rx.recv_blocking().unwrap();
-        let message = PostcardCodec::<TestMessage>::decode(&mut packet.as_slice()).unwrap();
+        let message = PostcardCodec::<TestMessage>::decode(&mut packet.data.as_slice()).unwrap();
         assert_eq!(message.id, 42);
     }
 
@@ -305,26 +316,16 @@ mod tests {
         let message = TestMessage { id: 42 };
         let mut packet = Vec::new();
         PostcardCodec::<TestMessage>::encode(&message, &mut packet).unwrap();
-        pkt_tx.send(packet).unwrap();
+        pkt_tx
+            .send(ProtocolPacketData {
+                data: packet,
+                recepients: Default::default(),
+            })
+            .unwrap();
 
         channel.pump().unwrap();
 
         let message = msg_rx.recv_blocking().unwrap();
-        assert_eq!(message.id, 42);
-    }
-
-    #[test]
-    fn test_channel_pipe() {
-        let (comm, msg) = Duplex::crossing_unbounded();
-
-        let mut channel = Channel::pipe(msg);
-
-        let message = TestMessage { id: 42 };
-        comm.sender.send(message).unwrap();
-
-        channel.pump().unwrap();
-
-        let message = comm.receiver.recv_blocking().unwrap();
-        assert_eq!(message.id, 42);
+        assert_eq!(message.message.id, 42);
     }
 }

@@ -13,6 +13,14 @@ pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
 pub struct Sender<T>(flume::Sender<T>);
 
 impl<T> Sender<T> {
+    pub fn is_connected(&self) -> bool {
+        !self.is_disconnected()
+    }
+
+    pub fn is_disconnected(&self) -> bool {
+        self.0.is_disconnected()
+    }
+
     pub fn send(&self, value: T) -> Result<(), Box<dyn Error>>
     where
         T: 'static,
@@ -61,6 +69,14 @@ impl<T> std::fmt::Debug for Sender<T> {
 pub struct Receiver<T>(flume::Receiver<T>);
 
 impl<T> Receiver<T> {
+    pub fn is_connected(&self) -> bool {
+        !self.is_disconnected()
+    }
+
+    pub fn is_disconnected(&self) -> bool {
+        self.0.is_disconnected()
+    }
+
     pub fn recv(&self) -> Result<Option<T>, Box<dyn Error>> {
         match self.0.try_recv() {
             Ok(value) => Ok(Some(value)),

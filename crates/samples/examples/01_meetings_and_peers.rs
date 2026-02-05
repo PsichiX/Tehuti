@@ -1,10 +1,10 @@
-use examples::tcp::{tcp_example_client, tcp_example_server};
-use std::{error::Error, time::Duration};
+use examples::tcp::tcp_example;
+use std::{error::Error, net::SocketAddr, time::Duration};
 use tehuti::{
-    channel::{ChannelId, ChannelMode},
-    event::{Duplex, Sender},
+    channel::{ChannelId, ChannelMode, Dispatch},
+    event::Duplex,
     meeting::{MeetingInterface, MeetingUserEvent},
-    peer::{PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
+    peer::{PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
 };
 use tehuti_mock::mock_recv_matching;
 
@@ -13,31 +13,29 @@ const MESSAGE_CHANNEL: ChannelId = ChannelId::new(0);
 
 /// Simple example demonstrating a server and client exchanging messages
 /// over a TCP connection using Tehuti's meeting and peer abstractions.
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     println!("Are you hosting a server? (y/n): ");
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
-    let server = input.trim().to_lowercase() == "y";
+    std::io::stdin().read_line(&mut input)?;
+    let is_server = input.trim().to_lowercase() == "y";
 
     let factory = PeerFactory::default().with_typed::<ChatRole>();
 
-    if server {
-        tcp_example_server(ADDRESS, factory.into(), app).unwrap();
-    } else {
-        tcp_example_client(ADDRESS, factory.into(), app).unwrap();
-    }
+    tcp_example(is_server, ADDRESS, factory.into(), app)?;
+    Ok(())
 }
 
-fn app(is_server: bool, meeting: MeetingInterface, terminate_sender: Sender<()>) {
+fn app(
+    is_server: bool,
+    meeting: MeetingInterface,
+    local_addr: SocketAddr,
+) -> Result<(), Box<dyn Error>> {
     // Make server create an authoritative peer, that's replicated to clients.
     if is_server {
-        meeting
-            .sender
-            .send(MeetingUserEvent::PeerCreate(
-                PeerId::new(0),
-                ChatRole::ROLE_ID,
-            ))
-            .unwrap();
+        meeting.sender.send(MeetingUserEvent::PeerCreate(
+            PeerId::new(0),
+            ChatRole::ROLE_ID,
+        ))?;
     }
 
     // Wait for the peer (created by server) to be added.
@@ -46,8 +44,7 @@ fn app(is_server: bool, meeting: MeetingInterface, terminate_sender: Sender<()>)
         Duration::from_secs(1),
         MeetingUserEvent::PeerAdded(peer) => peer
     )
-    .into_typed::<ChatRole>()
-    .unwrap();
+    .into_typed::<ChatRole>()?;
 
     // Get the sender and receiver for chat messages on separate threads.
     let Duplex { sender, receiver } = peer.events;
@@ -62,7 +59,9 @@ fn app(is_server: bool, meeting: MeetingInterface, terminate_sender: Sender<()>)
             if stdin.read_line(&mut message).is_err() || message.trim().to_lowercase() == "exit" {
                 return;
             }
-            sender.send(message).unwrap();
+            sender
+                .send(format!("{}: {}", local_addr, message.trim()).into())
+                .unwrap();
         }
     });
 
@@ -70,7 +69,7 @@ fn app(is_server: bool, meeting: MeetingInterface, terminate_sender: Sender<()>)
     let output = std::thread::spawn(move || {
         loop {
             if let Ok(message) = receiver.recv_blocking() {
-                println!(">>> {}", message);
+                println!("> {}", message.message.trim());
             } else {
                 return;
             }
@@ -80,17 +79,17 @@ fn app(is_server: bool, meeting: MeetingInterface, terminate_sender: Sender<()>)
     // Cleanup.
     input.join().unwrap();
     output.join().unwrap();
-    terminate_sender.send(()).unwrap();
+    Ok(())
 }
 
 struct ChatRole {
-    events: Duplex<String>,
+    events: Duplex<Dispatch<String>>,
 }
 
 impl TypedPeer for ChatRole {
     const ROLE_ID: PeerRoleId = PeerRoleId::new(0);
 
-    fn builder(builder: tehuti::peer::PeerBuilder) -> tehuti::peer::PeerBuilder {
+    fn builder(builder: PeerBuilder) -> PeerBuilder {
         builder.bind_read_write::<String, String>(
             MESSAGE_CHANNEL,
             ChannelMode::ReliableOrdered,
@@ -98,10 +97,7 @@ impl TypedPeer for ChatRole {
         )
     }
 
-    fn into_typed(mut peer: PeerDestructurer) -> Result<Self, Box<dyn Error>>
-    where
-        Self: Sized,
-    {
+    fn into_typed(mut peer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             events: peer.read_write(MESSAGE_CHANNEL)?,
         })

@@ -1,30 +1,54 @@
 use crate::{
     channel::{ChannelId, ChannelMode},
     event::{Receiver, Sender},
-    meeting::{Meeting, MeetingInterface},
-    peer::{PeerFactory, PeerInfo},
+    peer::PeerInfo,
+    protocol::ProtocolPacketData,
+    replication::{BufferRead, BufferWrite, Replicable},
 };
-use std::{collections::BTreeMap, error::Error, sync::Arc};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, error::Error};
 
-pub trait EngineMeeting<MeetingConfig> {
-    fn request_meeting(
-        &mut self,
-        factory: Arc<PeerFactory>,
-        config: MeetingConfig,
-        reply_sender: Sender<Result<(Meeting, MeetingInterface), Box<dyn Error + Send>>>,
-    ) -> Result<(), Box<dyn Error>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct EngineId(u128);
+
+impl EngineId {
+    pub const fn new(id: u128) -> Self {
+        Self(id)
+    }
+
+    pub const fn id(&self) -> u128 {
+        self.0
+    }
+}
+
+impl Replicable for EngineId {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        self.0.collect_changes(buffer)?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        self.0.apply_changes(buffer)?;
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for EngineId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#engine:{}", self.0)
+    }
 }
 
 #[derive(Debug)]
 pub struct EnginePacketSender {
     pub mode: ChannelMode,
-    pub sender: Sender<Vec<u8>>,
+    pub sender: Sender<ProtocolPacketData>,
 }
 
 #[derive(Debug)]
 pub struct EnginePacketReceiver {
     pub mode: ChannelMode,
-    pub receiver: Receiver<Vec<u8>>,
+    pub receiver: Receiver<ProtocolPacketData>,
 }
 
 #[derive(Debug)]

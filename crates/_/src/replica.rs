@@ -1,18 +1,21 @@
 use crate::{
-    channel::ChannelId,
+    channel::{ChannelId, Dispatch},
     codec::Codec,
     event::{Duplex, Receiver, Sender, unbounded},
     peer::Peer,
-    replication::{Replicable, Replicated, ReplicationPolicy},
-    rpc::{Rpc, RpcPartialDecoder},
+    replication::{
+        BufferRead, BufferWrite, Replicable, Replicated, ReplicationPolicy,
+        rpc::{Rpc, RpcPartialDecoder},
+    },
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     error::Error,
     io::{Cursor, Read, Write},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ReplicaId(u64);
 
 impl ReplicaId {
@@ -25,13 +28,25 @@ impl ReplicaId {
     }
 }
 
+impl Replicable for ReplicaId {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        self.0.collect_changes(buffer)?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        self.0.apply_changes(buffer)?;
+        Ok(())
+    }
+}
+
 impl std::fmt::Display for ReplicaId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "#replica:{}", self.0)
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ReplicationBuffer {
     replica_id: ReplicaId,
     buffer: Vec<u8>,
@@ -77,10 +92,10 @@ struct ReplicaInstance {
 }
 
 pub struct ReplicaSet {
-    change_sender: Option<Sender<ReplicationBuffer>>,
-    change_receiver: Option<Receiver<ReplicationBuffer>>,
-    rpc_sender: Option<Sender<ReplicationBuffer>>,
-    rpc_receiver: Option<Receiver<ReplicationBuffer>>,
+    change_sender: Option<Sender<Dispatch<ReplicationBuffer>>>,
+    change_receiver: Option<Receiver<Dispatch<ReplicationBuffer>>>,
+    rpc_sender: Option<Sender<Dispatch<ReplicationBuffer>>>,
+    rpc_receiver: Option<Receiver<Dispatch<ReplicationBuffer>>>,
     instances: BTreeMap<ReplicaId, ReplicaInstance>,
     killed_instances: Duplex<ReplicaId>,
 }
@@ -134,6 +149,10 @@ impl ReplicaSet {
         self.instances.contains_key(id)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = ReplicaId> {
+        self.instances.keys().copied()
+    }
+
     pub fn maintain(&mut self) {
         for id in self.killed_instances.receiver.iter().collect::<Vec<_>>() {
             self.destroy(&id);
@@ -142,20 +161,23 @@ impl ReplicaSet {
             for (replica_id, instance) in &self.instances {
                 if let Some(receiver) = &instance.change_receiver {
                     for buffer in receiver.iter() {
-                        let _ = change_sender.send(ReplicationBuffer {
-                            replica_id: *replica_id,
-                            buffer,
-                        });
+                        let _ = change_sender.send(
+                            ReplicationBuffer {
+                                replica_id: *replica_id,
+                                buffer,
+                            }
+                            .into(),
+                        );
                     }
                 }
             }
         }
         if let Some(change_receiver) = &self.change_receiver {
             for buffer in change_receiver.iter() {
-                if let Some(instance) = self.instances.get_mut(&buffer.replica_id)
+                if let Some(instance) = self.instances.get_mut(&buffer.message.replica_id)
                     && let Some(sender) = &instance.change_sender
                 {
-                    let _ = sender.send(buffer.buffer);
+                    let _ = sender.send(buffer.message.buffer);
                 }
             }
         }
@@ -163,26 +185,29 @@ impl ReplicaSet {
             for (replica_id, instance) in &self.instances {
                 if let Some(receiver) = &instance.rpc_receiver {
                     for buffer in receiver.iter() {
-                        let _ = rpc_sender.send(ReplicationBuffer {
-                            replica_id: *replica_id,
-                            buffer,
-                        });
+                        let _ = rpc_sender.send(
+                            ReplicationBuffer {
+                                replica_id: *replica_id,
+                                buffer,
+                            }
+                            .into(),
+                        );
                     }
                 }
             }
         }
         if let Some(rpc_receiver) = &self.rpc_receiver {
             for buffer in rpc_receiver.iter() {
-                if let Some(instance) = self.instances.get_mut(&buffer.replica_id)
+                if let Some(instance) = self.instances.get_mut(&buffer.message.replica_id)
                     && let Some(sender) = &instance.rpc_sender
                 {
-                    let _ = sender.send(buffer.buffer);
+                    let _ = sender.send(buffer.message.buffer);
                 }
             }
         }
     }
 
-    pub fn bind(
+    pub fn bind_peer(
         &mut self,
         peer: &Peer,
         change_channel_id: Option<ChannelId>,
@@ -208,6 +233,32 @@ impl ReplicaSet {
                 .ok()
                 .cloned();
         }
+    }
+
+    pub fn bind_change(&mut self, change: Duplex<Dispatch<ReplicationBuffer>>) {
+        self.change_sender = Some(change.sender);
+        self.change_receiver = Some(change.receiver);
+    }
+
+    pub fn bind_rpc(&mut self, rpc: Duplex<Dispatch<ReplicationBuffer>>) {
+        self.rpc_sender = Some(rpc.sender);
+        self.rpc_receiver = Some(rpc.receiver);
+    }
+
+    pub fn bind_change_sender(&mut self, change_sender: Sender<Dispatch<ReplicationBuffer>>) {
+        self.change_sender = Some(change_sender);
+    }
+
+    pub fn bind_change_receiver(&mut self, change_receiver: Receiver<Dispatch<ReplicationBuffer>>) {
+        self.change_receiver = Some(change_receiver);
+    }
+
+    pub fn bind_rpc_sender(&mut self, rpc_sender: Sender<Dispatch<ReplicationBuffer>>) {
+        self.rpc_sender = Some(rpc_sender);
+    }
+
+    pub fn bind_rpc_receiver(&mut self, rpc_receiver: Receiver<Dispatch<ReplicationBuffer>>) {
+        self.rpc_receiver = Some(rpc_receiver);
     }
 
     pub fn unbind(&mut self) {
@@ -256,11 +307,11 @@ impl Replica {
         self.id
     }
 
-    pub fn collect_changes(&self) -> ReplicaCollectChanges<'_> {
+    pub fn collect_changes(&self) -> Option<ReplicaCollectChanges> {
         ReplicaCollectChanges::new(self)
     }
 
-    pub fn apply_changes(&self) -> Result<Option<ReplicaApplyChanges>, Box<dyn Error>> {
+    pub fn apply_changes(&self) -> Option<ReplicaApplyChanges> {
         ReplicaApplyChanges::new(self)
     }
 
@@ -270,38 +321,48 @@ impl Replica {
         })
     }
 
-    pub fn rpc_receive(&self) -> Result<RpcPartialDecoder, Box<dyn Error>> {
-        let receiver = self
-            .rpc_receiver
-            .as_ref()
-            .ok_or("RPC receiver is not bound to a peer read channel")?;
-        let buffer = receiver.try_recv().ok_or("No RPC available to receive")?;
-        RpcPartialDecoder::new(buffer)
+    pub fn rpc_receive(&self) -> Option<Result<RpcPartialDecoder, Box<dyn Error>>> {
+        let receiver = self.rpc_receiver.as_ref()?;
+        let buffer = receiver.try_recv()?;
+        Some(RpcPartialDecoder::new(buffer))
     }
 }
 
-pub struct ReplicaCollectChanges<'a> {
-    replica: &'a Replica,
+pub struct ReplicaCollectChanges {
+    sender: Sender<Vec<u8>>,
     buffer: Option<Cursor<Vec<u8>>>,
 }
 
-impl<'a> Drop for ReplicaCollectChanges<'a> {
+impl Drop for ReplicaCollectChanges {
     fn drop(&mut self) {
-        if let Some(sender) = &self.replica.change_sender {
-            let _ = sender.send(self.buffer.take().unwrap_or_default().into_inner());
+        if let Some(buffer) = self.buffer.take() {
+            let buffer = buffer.into_inner();
+            if !buffer.is_empty() {
+                let _ = self.sender.send(buffer);
+            }
         }
     }
 }
 
-impl<'a> ReplicaCollectChanges<'a> {
-    pub fn new(replica: &'a Replica) -> Self {
-        Self {
-            replica,
+impl ReplicaCollectChanges {
+    pub fn new(replica: &Replica) -> Option<Self> {
+        Some(Self {
+            sender: replica.change_sender.as_ref().cloned()?,
             buffer: Some(Default::default()),
-        }
+        })
     }
 
-    pub fn collect<P, T>(&mut self, replicated: &mut Replicated<P, T>) -> Result<(), Box<dyn Error>>
+    pub fn size(&self) -> usize {
+        self.buffer
+            .as_ref()
+            .map(|b| b.get_ref().len())
+            .unwrap_or_default()
+    }
+
+    pub fn collect_replicated<P, T>(
+        &mut self,
+        replicated: &mut Replicated<P, T>,
+    ) -> Result<(), Box<dyn Error>>
     where
         P: ReplicationPolicy<T>,
         T: Replicable,
@@ -311,35 +372,58 @@ impl<'a> ReplicaCollectChanges<'a> {
         }
         Ok(())
     }
-}
 
-pub struct ReplicaApplyChanges {
-    buffer: Option<Vec<u8>>,
-}
-
-impl ReplicaApplyChanges {
-    pub fn new(replica: &Replica) -> Result<Option<Self>, Box<dyn Error>> {
-        if let Some(receiver) = &replica.change_receiver {
-            if let Some(buffer) = receiver.try_recv() {
-                Ok(Some(Self {
-                    buffer: Some(buffer),
-                }))
-            } else {
-                Ok(None)
-            }
-        } else {
-            Err("Replica is not bound to a peer read channel".into())
-        }
-    }
-
-    pub fn apply<P, T>(&mut self, replicated: &mut Replicated<P, T>) -> Result<(), Box<dyn Error>>
+    pub fn collect_replicable<P, T>(&mut self, replicable: &T) -> Result<(), Box<dyn Error>>
     where
         P: ReplicationPolicy<T>,
         T: Replicable,
     {
         if let Some(buffer) = &mut self.buffer {
-            Replicated::apply_changes(replicated, &mut Cursor::new(buffer))?;
+            replicable.collect_changes(buffer)?;
         }
+        Ok(())
+    }
+}
+
+pub struct ReplicaApplyChanges {
+    buffer: Vec<u8>,
+}
+
+impl ReplicaApplyChanges {
+    pub fn new(replica: &Replica) -> Option<Self> {
+        if let Some(receiver) = &replica.change_receiver {
+            receiver.try_recv().map(|buffer| Self { buffer })
+        } else {
+            None
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        self.buffer.len()
+    }
+
+    pub fn apply_replicated<P, T>(
+        &mut self,
+        replicated: &mut Replicated<P, T>,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        P: ReplicationPolicy<T>,
+        T: Replicable,
+    {
+        let mut cursor = Cursor::new(self.buffer.as_slice());
+        Replicated::apply_changes(replicated, &mut cursor)?;
+        self.buffer.drain(0..cursor.position() as usize);
+        Ok(())
+    }
+
+    pub fn apply_replicable<P, T>(&mut self, replicable: &mut T) -> Result<(), Box<dyn Error>>
+    where
+        P: ReplicationPolicy<T>,
+        T: Replicable,
+    {
+        let mut cursor = Cursor::new(self.buffer.as_slice());
+        replicable.apply_changes(&mut cursor)?;
+        self.buffer.drain(0..cursor.position() as usize);
         Ok(())
     }
 }
@@ -349,39 +433,53 @@ mod tests {
     use super::*;
     use crate::{
         channel::{ChannelId, ChannelMode},
-        peer::{PeerBuildResult, PeerBuilder, PeerId, PeerRoleId},
+        peer::{PeerBuildResult, PeerBuilder, PeerId, PeerInfo, PeerRoleId},
         replication::HashReplicated,
     };
 
     #[test]
     fn test_replica_set_bind_unbind() {
         let (meeting_sender, _) = unbounded();
-        let peer_a = PeerBuilder::new(PeerId::new(0), PeerRoleId::new(0), false, meeting_sender)
-            .bind_write::<ReplicationBuffer, ReplicationBuffer>(
-                ChannelId::new(0),
-                ChannelMode::ReliableOrdered,
-                None,
-            )
-            .build()
-            .peer;
+        let peer_a = PeerBuilder::new(Peer::new(
+            PeerInfo {
+                peer_id: PeerId::new(0),
+                role_id: PeerRoleId::new(0),
+                remote: false,
+            },
+            meeting_sender,
+        ))
+        .bind_write::<ReplicationBuffer, ReplicationBuffer>(
+            ChannelId::new(0),
+            ChannelMode::ReliableOrdered,
+            None,
+        )
+        .build()
+        .peer;
 
         let (meeting_sender, _) = unbounded();
-        let peer_b = PeerBuilder::new(PeerId::new(0), PeerRoleId::new(0), false, meeting_sender)
-            .bind_read::<ReplicationBuffer, ReplicationBuffer>(
-                ChannelId::new(0),
-                ChannelMode::ReliableOrdered,
-                None,
-            )
-            .build()
-            .peer;
+        let peer_b = PeerBuilder::new(Peer::new(
+            PeerInfo {
+                peer_id: PeerId::new(0),
+                role_id: PeerRoleId::new(0),
+                remote: false,
+            },
+            meeting_sender,
+        ))
+        .bind_read::<ReplicationBuffer, ReplicationBuffer>(
+            ChannelId::new(0),
+            ChannelMode::ReliableOrdered,
+            None,
+        )
+        .build()
+        .peer;
 
         let mut set = ReplicaSet::default();
-        set.bind(&peer_a, Some(ChannelId::new(0)), None);
+        set.bind_peer(&peer_a, Some(ChannelId::new(0)), None);
 
         assert!(set.change_sender.is_some());
         assert!(set.change_receiver.is_none());
 
-        set.bind(&peer_b, Some(ChannelId::new(0)), None);
+        set.bind_peer(&peer_b, Some(ChannelId::new(0)), None);
         assert!(set.change_sender.is_none());
         assert!(set.change_receiver.is_some());
 
@@ -398,21 +496,32 @@ mod tests {
             peer,
             mut channels,
             descriptor,
-        } = PeerBuilder::new(PeerId::new(0), PeerRoleId::new(0), false, meeting_sender)
-            .bind_read_write::<ReplicationBuffer, ReplicationBuffer>(
-                ChannelId::new(0),
-                ChannelMode::ReliableOrdered,
-                None,
-            )
-            .build();
+        } = PeerBuilder::new(Peer::new(
+            PeerInfo {
+                peer_id: PeerId::new(0),
+                role_id: PeerRoleId::new(0),
+                remote: false,
+            },
+            meeting_sender,
+        ))
+        .bind_read_write::<ReplicationBuffer, ReplicationBuffer>(
+            ChannelId::new(0),
+            ChannelMode::ReliableOrdered,
+            None,
+        )
+        .build();
 
         let mut data = HashReplicated::new(42u32);
         let mut set = ReplicaSet::default();
-        set.bind(&peer, Some(ChannelId::new(0)), None);
+        set.bind_peer(&peer, Some(ChannelId::new(0)), None);
         let replica = set.create(ReplicaId::new(0)).unwrap();
 
         // Collect changes and send them over the channel.
-        replica.collect_changes().collect(&mut data).unwrap();
+        replica
+            .collect_changes()
+            .unwrap()
+            .collect_replicated(&mut data)
+            .unwrap();
 
         // Pump the channels.
         set.maintain();
@@ -427,7 +536,7 @@ mod tests {
             .receiver
             .recv_blocking()
             .unwrap();
-        assert_eq!(packet.len(), 20);
+        assert_eq!(packet.data.len(), 20);
 
         descriptor
             .packet_senders
@@ -449,8 +558,7 @@ mod tests {
         replica
             .apply_changes()
             .unwrap()
-            .unwrap()
-            .apply(&mut data)
+            .apply_replicated(&mut data)
             .unwrap();
         assert_eq!(*data, 42);
     }
@@ -467,16 +575,23 @@ mod tests {
             peer,
             mut channels,
             descriptor,
-        } = PeerBuilder::new(PeerId::new(0), PeerRoleId::new(0), false, meeting_sender)
-            .bind_read_write::<ReplicationBuffer, ReplicationBuffer>(
-                ChannelId::new(0),
-                ChannelMode::ReliableOrdered,
-                None,
-            )
-            .build();
+        } = PeerBuilder::new(Peer::new(
+            PeerInfo {
+                peer_id: PeerId::new(0),
+                role_id: PeerRoleId::new(0),
+                remote: false,
+            },
+            meeting_sender,
+        ))
+        .bind_read_write::<ReplicationBuffer, ReplicationBuffer>(
+            ChannelId::new(0),
+            ChannelMode::ReliableOrdered,
+            None,
+        )
+        .build();
 
         let mut set = ReplicaSet::default();
-        set.bind(&peer, None, Some(ChannelId::new(0)));
+        set.bind_peer(&peer, None, Some(ChannelId::new(0)));
         let replica = set.create(ReplicaId::new(0)).unwrap();
 
         // Send an RPC over the channel.
@@ -499,7 +614,7 @@ mod tests {
             .receiver
             .recv_blocking()
             .unwrap();
-        assert_eq!(packet.len(), 61);
+        assert_eq!(packet.data.len(), 61);
 
         descriptor
             .packet_senders
@@ -517,6 +632,7 @@ mod tests {
         // Receive the RPC.
         let rpc = replica
             .rpc_receive()
+            .unwrap()
             .unwrap()
             .complete::<(), String>()
             .unwrap();

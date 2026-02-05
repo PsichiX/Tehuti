@@ -6,14 +6,13 @@ format:
 
 build:
   cargo build --all --all-features
+  cargo build --examples --all --all-features
 
 test:
   cargo test --all --all-features -- --nocapture
 
 miri:
   cargo +nightly miri test --manifest-path ./crates/_/Cargo.toml -- --nocapture
-  # cargo +nightly miri test --manifest-path ./crates/mock/Cargo.toml -- --nocapture
-  # cargo +nightly miri test --manifest-path ./crates/socket/Cargo.toml -- --nocapture
   
 clippy:
   cargo clippy --all --all-features
@@ -51,7 +50,14 @@ build-samples:
   cargo build --manifest-path ./crates/samples/Cargo.toml --examples
 
 run-sample NAME:
-  ./target/debug/examples/{{NAME}}
+  #!/usr/bin/env bash
+  SAMPLE=$(find ./target/debug/examples -type f -executable -name "{{NAME}}*" | head -n 1)
+  if [ -z "$SAMPLE" ]; then
+    echo "No sample found matching: {{NAME}}*"
+    exit 1
+  fi
+  echo "Running sample: $SAMPLE"
+  "$SAMPLE"
 
 publish:
   cargo publish --no-verify --manifest-path ./crates/_/Cargo.toml

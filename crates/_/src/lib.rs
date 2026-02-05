@@ -38,7 +38,6 @@ pub mod peer;
 pub mod protocol;
 pub mod replica;
 pub mod replication;
-pub mod rpc;
 
 pub mod third_party {
     pub use leb128;

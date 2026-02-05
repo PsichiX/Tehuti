@@ -2,7 +2,7 @@ use crate::{
     channel::Channel,
     engine::EnginePeerDescriptor,
     event::Duplex,
-    peer::{Peer, PeerBuildResult, PeerFactory, PeerId, PeerRoleId},
+    peer::{Peer, PeerBuildResult, PeerFactory, PeerId, PeerInfo, PeerRoleId},
 };
 use std::{
     collections::BTreeMap,
@@ -58,7 +58,7 @@ impl Drop for Meeting {
         tracing::event!(
             target: "tehuti::meeting",
             tracing::Level::TRACE,
-            "Meeting {} closed",
+            "Meeting closed: {}",
             self.name
         );
     }
@@ -75,7 +75,7 @@ impl Meeting {
         tracing::event!(
             target: "tehuti::meeting",
             tracing::Level::TRACE,
-            "Meeting {} opened",
+            "Meeting opened: {}",
             name
         );
         Self {
@@ -141,9 +141,14 @@ impl Meeting {
                     peer,
                     channels,
                     descriptor,
-                } = self
-                    .factory
-                    .create(peer_id, role_id, true, self.user_event.sender.clone())?;
+                } = self.factory.create(Peer::new(
+                    PeerInfo {
+                        peer_id,
+                        role_id,
+                        remote: true,
+                    },
+                    self.user_event.sender.clone(),
+                ))?;
                 if self.peers.contains_key(&peer.info().peer_id) {
                     return Err(format!("Peer {:?} already exists", peer.info().peer_id).into());
                 }
@@ -189,9 +194,14 @@ impl Meeting {
                     peer,
                     channels,
                     descriptor,
-                } = self
-                    .factory
-                    .create(peer_id, role_id, false, self.user_event.sender.clone())?;
+                } = self.factory.create(Peer::new(
+                    PeerInfo {
+                        peer_id,
+                        role_id,
+                        remote: false,
+                    },
+                    self.user_event.sender.clone(),
+                ))?;
                 if self.peers.contains_key(&peer.info().peer_id) {
                     return Err(format!("Peer {:?} already exists", peer.info().peer_id).into());
                 }

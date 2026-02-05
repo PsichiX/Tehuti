@@ -1,13 +1,23 @@
 use crate::{
-    channel::{Channel, ChannelId, ChannelMode},
+    channel::{Channel, ChannelId, ChannelMode, Dispatch},
     codec::Codec,
     engine::{EnginePacketReceiver, EnginePacketSender, EnginePeerDescriptor},
     event::{Duplex, Receiver, Sender, bounded, unbounded},
     meeting::MeetingUserEvent,
+    protocol::ProtocolPacketData,
+    replication::{BufferRead, BufferWrite, Replicable},
 };
-use std::{any::Any, collections::BTreeMap, error::Error, hash::Hash, sync::Arc, time::Duration};
+use serde::{Deserialize, Serialize};
+use std::{
+    any::{Any, TypeId},
+    collections::{BTreeMap, HashMap},
+    error::Error,
+    hash::Hash,
+    sync::Arc,
+    time::Duration,
+};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PeerId(u64);
 
 impl PeerId {
@@ -20,13 +30,25 @@ impl PeerId {
     }
 }
 
+impl Replicable for PeerId {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        self.0.collect_changes(buffer)?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        self.0.apply_changes(buffer)?;
+        Ok(())
+    }
+}
+
 impl std::fmt::Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "#peer:{}", self.0)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PeerRoleId(u64);
 
 impl PeerRoleId {
@@ -47,17 +69,91 @@ impl PeerRoleId {
     }
 }
 
+impl Replicable for PeerRoleId {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        self.0.collect_changes(buffer)?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        self.0.apply_changes(buffer)?;
+        Ok(())
+    }
+}
+
 impl std::fmt::Display for PeerRoleId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "#role:{}", self.0)
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub peer_id: PeerId,
     pub role_id: PeerRoleId,
     pub remote: bool,
+}
+
+#[derive(Default, Clone)]
+pub struct PeerUserData(Arc<HashMap<TypeId, Box<dyn Any + Send + Sync>>>);
+
+impl PeerUserData {
+    pub fn is_frozen(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
+
+    pub fn with<T: Any + Send + Sync + 'static>(mut self, data: T) -> Result<Self, Box<dyn Error>> {
+        Arc::get_mut(&mut self.0)
+            .ok_or("PeerUserData is frozen")?
+            .insert(TypeId::of::<T>(), Box::new(data));
+        Ok(self)
+    }
+
+    pub fn access<T: Any + Send + Sync + 'static>(&self) -> Result<&T, Box<dyn Error>> {
+        self.0
+            .get(&TypeId::of::<T>())
+            .and_then(|data| data.downcast_ref::<T>())
+            .ok_or_else(|| {
+                format!(
+                    "User data for type: {} not found!",
+                    std::any::type_name::<T>()
+                )
+                .into()
+            })
+    }
+}
+
+impl std::fmt::Debug for PeerUserData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerUserData").finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug)]
+pub struct PeerKiller {
+    peer_id: PeerId,
+    meeting_sender: Sender<MeetingUserEvent>,
+    pub destroy_on_drop: bool,
+}
+
+impl PeerKiller {
+    pub fn new(peer_id: PeerId, meeting_sender: Sender<MeetingUserEvent>) -> Self {
+        Self {
+            peer_id,
+            meeting_sender,
+            destroy_on_drop: true,
+        }
+    }
+}
+
+impl Drop for PeerKiller {
+    fn drop(&mut self) {
+        if self.destroy_on_drop {
+            let _ = self
+                .meeting_sender
+                .send(MeetingUserEvent::PeerDestroy(self.peer_id));
+        }
+    }
 }
 
 /// User-side interface for a peer existing in a meeting.
@@ -66,35 +162,33 @@ pub struct PeerInfo {
 #[derive(Debug)]
 pub struct Peer {
     info: PeerInfo,
+    user_data: PeerUserData,
     receivers: BTreeMap<ChannelId, Box<dyn Any + Send>>,
     senders: BTreeMap<ChannelId, Box<dyn Any + Send>>,
-    meeting_sender: Sender<MeetingUserEvent>,
-    destroy_on_drop: bool,
-}
-
-impl Drop for Peer {
-    fn drop(&mut self) {
-        if self.destroy_on_drop {
-            let _ = self
-                .meeting_sender
-                .send(MeetingUserEvent::PeerDestroy(self.info.peer_id));
-        }
-    }
+    killer: PeerKiller,
 }
 
 impl Peer {
     pub fn new(info: PeerInfo, meeting_sender: Sender<MeetingUserEvent>) -> Self {
         Self {
             info,
+            user_data: Default::default(),
             receivers: Default::default(),
             senders: Default::default(),
-            meeting_sender,
-            destroy_on_drop: true,
+            killer: PeerKiller::new(info.peer_id, meeting_sender),
         }
     }
 
-    pub fn destructure(mut self) -> PeerDestructurer {
-        self.destroy_on_drop = false;
+    pub fn with_user_data(mut self, data: PeerUserData) -> Self {
+        self.user_data = data;
+        self
+    }
+
+    pub fn user_data(&self) -> &PeerUserData {
+        &self.user_data
+    }
+
+    pub fn destructure(self) -> PeerDestructurer {
         PeerDestructurer::new(self)
     }
 
@@ -109,7 +203,7 @@ impl Peer {
     pub(crate) fn sender<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-    ) -> Result<&Sender<Message>, Box<dyn Error>> {
+    ) -> Result<&Sender<Dispatch<Message>>, Box<dyn Error>> {
         self.senders
             .get(&channel_id)
             .ok_or_else(|| {
@@ -118,7 +212,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Sender<Message>>()
+            .downcast_ref::<Sender<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message sender {:?} for Peer {:?} has different message type",
@@ -131,7 +225,7 @@ impl Peer {
     pub(crate) fn receiver<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-    ) -> Result<&Receiver<Message>, Box<dyn Error>> {
+    ) -> Result<&Receiver<Dispatch<Message>>, Box<dyn Error>> {
         self.receivers
             .get(&channel_id)
             .ok_or_else(|| {
@@ -140,7 +234,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Receiver<Message>>()
+            .downcast_ref::<Receiver<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message receiver {:?} for Peer {:?} has different message type",
@@ -153,7 +247,7 @@ impl Peer {
     pub fn send<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-        message: Message,
+        message: Dispatch<Message>,
     ) -> Result<(), Box<dyn Error>> {
         self.senders
             .get(&channel_id)
@@ -163,7 +257,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Sender<Message>>()
+            .downcast_ref::<Sender<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message sender {:?} for Peer {:?} has different message type",
@@ -178,7 +272,7 @@ impl Peer {
     pub async fn send_async<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-        message: Message,
+        message: Dispatch<Message>,
     ) -> Result<(), Box<dyn Error>> {
         self.senders
             .get(&channel_id)
@@ -188,7 +282,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Sender<Message>>()
+            .downcast_ref::<Sender<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message sender {:?} for Peer {:?} has different message type",
@@ -204,7 +298,7 @@ impl Peer {
     pub fn recv<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-    ) -> Result<Option<Message>, Box<dyn Error>> {
+    ) -> Result<Option<Dispatch<Message>>, Box<dyn Error>> {
         let receiver = self
             .receivers
             .get(&channel_id)
@@ -214,7 +308,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Receiver<Message>>()
+            .downcast_ref::<Receiver<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message receiver {:?} for Peer {:?} has different message type",
@@ -227,7 +321,7 @@ impl Peer {
     pub fn recv_blocking<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-    ) -> Result<Message, Box<dyn Error>> {
+    ) -> Result<Dispatch<Message>, Box<dyn Error>> {
         let receiver = self
             .receivers
             .get(&channel_id)
@@ -237,7 +331,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Receiver<Message>>()
+            .downcast_ref::<Receiver<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message receiver {:?} for Peer {:?} has different message type",
@@ -251,7 +345,7 @@ impl Peer {
         &self,
         channel_id: ChannelId,
         duration: Duration,
-    ) -> Result<Message, Box<dyn Error>> {
+    ) -> Result<Dispatch<Message>, Box<dyn Error>> {
         let receiver = self
             .receivers
             .get(&channel_id)
@@ -261,7 +355,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Receiver<Message>>()
+            .downcast_ref::<Receiver<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message receiver {:?} for Peer {:?} has different message type",
@@ -274,7 +368,7 @@ impl Peer {
     pub async fn recv_async<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
-    ) -> Result<Message, Box<dyn Error>> {
+    ) -> Result<Dispatch<Message>, Box<dyn Error>> {
         let receiver = self
             .receivers
             .get(&channel_id)
@@ -284,7 +378,7 @@ impl Peer {
                     self.info.peer_id, channel_id
                 )
             })?
-            .downcast_ref::<Receiver<Message>>()
+            .downcast_ref::<Receiver<Dispatch<Message>>>()
             .ok_or_else(|| {
                 format!(
                     "Message receiver {:?} for Peer {:?} has different message type",
@@ -302,31 +396,32 @@ pub struct PeerBuildResult {
     pub descriptor: EnginePeerDescriptor,
 }
 
+struct PeerBuilderChannel {
+    mode: ChannelMode,
+    channel: Channel,
+}
+
 pub struct PeerBuilder {
     peer: Peer,
-    read_channels: BTreeMap<ChannelId, (ChannelMode, Channel, Sender<Vec<u8>>)>,
-    write_channels: BTreeMap<ChannelId, (ChannelMode, Channel, Receiver<Vec<u8>>)>,
+    read_channels: BTreeMap<ChannelId, (PeerBuilderChannel, Sender<ProtocolPacketData>)>,
+    write_channels: BTreeMap<ChannelId, (PeerBuilderChannel, Receiver<ProtocolPacketData>)>,
 }
 
 impl PeerBuilder {
-    pub fn new(
-        peer_id: PeerId,
-        role_id: PeerRoleId,
-        remote: bool,
-        meeting_sender: Sender<MeetingUserEvent>,
-    ) -> Self {
+    pub fn new(peer: Peer) -> Self {
         Self {
-            peer: Peer::new(
-                PeerInfo {
-                    peer_id,
-                    role_id,
-                    remote,
-                },
-                meeting_sender,
-            ),
+            peer,
             read_channels: Default::default(),
             write_channels: Default::default(),
         }
+    }
+
+    pub fn info(&self) -> &PeerInfo {
+        &self.peer.info
+    }
+
+    pub fn user_data(&self) -> &PeerUserData {
+        &self.peer.user_data
     }
 
     pub fn bind_read<C: Codec<Value = Message> + Send + 'static, Message: Send + 'static>(
@@ -346,8 +441,10 @@ impl PeerBuilder {
             unbounded()
         };
         let channel = Channel::read::<C, Message>(packet_rx, message_tx);
-        self.read_channels
-            .insert(channel_id, (mode, channel, packet_tx));
+        self.read_channels.insert(
+            channel_id,
+            (PeerBuilderChannel { mode, channel }, packet_tx),
+        );
         self.peer
             .receivers
             .insert(channel_id, Box::new(message_rx) as Box<dyn Any + Send>);
@@ -371,8 +468,10 @@ impl PeerBuilder {
             unbounded()
         };
         let channel = Channel::write::<C, Message>(packet_tx, message_rx);
-        self.write_channels
-            .insert(channel_id, (mode, channel, packet_rx));
+        self.write_channels.insert(
+            channel_id,
+            (PeerBuilderChannel { mode, channel }, packet_rx),
+        );
         self.peer
             .senders
             .insert(channel_id, Box::new(message_tx) as Box<dyn Any + Send>);
@@ -393,7 +492,7 @@ impl PeerBuilder {
         let mut channels = Vec::new();
         let mut packet_senders = BTreeMap::new();
         let mut packet_receivers = BTreeMap::new();
-        for (channel_id, (mode, channel, packet_tx)) in self.read_channels {
+        for (channel_id, (PeerBuilderChannel { mode, channel }, packet_tx)) in self.read_channels {
             channels.push(channel);
             packet_senders.insert(
                 channel_id,
@@ -403,7 +502,7 @@ impl PeerBuilder {
                 },
             );
         }
-        for (channel_id, (mode, channel, packet_rx)) in self.write_channels {
+        for (channel_id, (PeerBuilderChannel { mode, channel }, packet_rx)) in self.write_channels {
             channels.push(channel);
             packet_receivers.insert(
                 channel_id,
@@ -426,16 +525,14 @@ impl PeerBuilder {
     }
 }
 
-pub trait TypedPeer {
+pub trait TypedPeer: Sized {
     const ROLE_ID: PeerRoleId;
 
     fn builder(builder: PeerBuilder) -> PeerBuilder {
         builder
     }
 
-    fn into_typed(peer: PeerDestructurer) -> Result<Self, Box<dyn Error>>
-    where
-        Self: Sized;
+    fn into_typed(peer: PeerDestructurer) -> Result<Self, Box<dyn Error>>;
 }
 
 pub struct PeerDestructurer {
@@ -443,7 +540,8 @@ pub struct PeerDestructurer {
 }
 
 impl PeerDestructurer {
-    pub fn new(peer: Peer) -> Self {
+    pub fn new(mut peer: Peer) -> Self {
+        peer.killer.destroy_on_drop = false;
         Self { peer }
     }
 
@@ -451,10 +549,22 @@ impl PeerDestructurer {
         self.peer.info()
     }
 
+    pub fn user_data(&self) -> &PeerUserData {
+        self.peer.user_data()
+    }
+
+    pub fn killer(&mut self) -> PeerKiller {
+        PeerKiller {
+            peer_id: self.peer.info.peer_id,
+            meeting_sender: self.peer.killer.meeting_sender.clone(),
+            destroy_on_drop: true,
+        }
+    }
+
     pub fn read<Message: Send + 'static>(
         &mut self,
         channel_id: ChannelId,
-    ) -> Result<Receiver<Message>, Box<dyn Error>> {
+    ) -> Result<Receiver<Dispatch<Message>>, Box<dyn Error>> {
         let receiver = self
             .peer
             .receivers
@@ -465,7 +575,7 @@ impl PeerDestructurer {
                     self.peer.info.peer_id, channel_id
                 )
             })?
-            .downcast::<Receiver<Message>>()
+            .downcast::<Receiver<Dispatch<Message>>>()
             .map_err(|_| {
                 format!(
                     "Message receiver {:?} for Peer {:?} has different message type",
@@ -478,7 +588,7 @@ impl PeerDestructurer {
     pub fn write<Message: Send + 'static>(
         &mut self,
         channel_id: ChannelId,
-    ) -> Result<Sender<Message>, Box<dyn Error>> {
+    ) -> Result<Sender<Dispatch<Message>>, Box<dyn Error>> {
         let sender = self
             .peer
             .senders
@@ -489,7 +599,7 @@ impl PeerDestructurer {
                     self.peer.info.peer_id, channel_id
                 )
             })?
-            .downcast::<Sender<Message>>()
+            .downcast::<Sender<Dispatch<Message>>>()
             .map_err(|_| {
                 format!(
                     "Message sender {:?} for Peer {:?} has different message type",
@@ -502,7 +612,7 @@ impl PeerDestructurer {
     pub fn read_write<Message: Send + 'static>(
         &mut self,
         channel_id: ChannelId,
-    ) -> Result<Duplex<Message>, Box<dyn Error>> {
+    ) -> Result<Duplex<Dispatch<Message>>, Box<dyn Error>> {
         let receiver = self.read::<Message>(channel_id)?;
         let sender = self.write::<Message>(channel_id)?;
         Ok(Duplex { sender, receiver })
@@ -512,9 +622,23 @@ impl PeerDestructurer {
 #[derive(Default)]
 pub struct PeerFactory {
     registry: BTreeMap<PeerRoleId, Arc<dyn Fn(PeerBuilder) -> PeerBuilder + Send + Sync>>,
+    user_data: PeerUserData,
 }
 
 impl PeerFactory {
+    pub fn new(mut self, user_data: PeerUserData) -> Self {
+        self.user_data = user_data;
+        self
+    }
+
+    pub fn with_user_data<T: Any + Send + Sync + 'static>(
+        mut self,
+        data: T,
+    ) -> Result<Self, Box<dyn Error>> {
+        self.user_data = self.user_data.with(data)?;
+        Ok(self)
+    }
+
     pub fn with(
         mut self,
         role_id: PeerRoleId,
@@ -546,18 +670,12 @@ impl PeerFactory {
         self.register(T::ROLE_ID, T::builder);
     }
 
-    pub fn create(
-        &self,
-        peer_id: PeerId,
-        role_id: PeerRoleId,
-        remote: bool,
-        meeting_sender: Sender<MeetingUserEvent>,
-    ) -> Result<PeerBuildResult, Box<dyn Error>> {
+    pub fn create(&self, peer: Peer) -> Result<PeerBuildResult, Box<dyn Error>> {
         let builder_fn = self
             .registry
-            .get(&role_id)
-            .ok_or_else(|| format!("No registered builder for role id {:?}", role_id))?;
-        let builder = PeerBuilder::new(peer_id, role_id, remote, meeting_sender);
+            .get(&peer.info.role_id)
+            .ok_or_else(|| format!("No registered builder for role id {:?}", peer.info.role_id))?;
+        let builder = PeerBuilder::new(peer.with_user_data(self.user_data.clone()));
         let peer_builder = builder_fn(builder);
         Ok(peer_builder.build())
     }
@@ -580,9 +698,7 @@ mod tests {
     #[test]
     fn test_peer() {
         let factory = PeerFactory::default().with(PeerRoleId::new(0), |builder| {
-            builder
-                .bind_read::<u8, u8>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
-                .bind_write::<u8, u8>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
+            builder.bind_read_write::<u8, u8>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
         });
         let (meeting_tx, _) = unbounded();
 
@@ -592,13 +708,27 @@ mod tests {
             peer,
             mut channels,
             descriptor,
-        } = factory.create(peer_id, role_id, false, meeting_tx).unwrap();
+        } = factory
+            .create(Peer::new(
+                PeerInfo {
+                    peer_id,
+                    role_id,
+                    remote: false,
+                },
+                meeting_tx,
+            ))
+            .unwrap();
 
         assert_eq!(peer.info().peer_id, peer_id);
         assert_eq!(peer.info().role_id, role_id);
         assert_eq!(channels.len(), 2);
 
-        peer.send(ChannelId::new(0), 42u8).unwrap();
+        let events = peer
+            .destructure()
+            .read_write::<u8>(ChannelId::new(0))
+            .unwrap();
+
+        events.sender.send(42u8.into()).unwrap();
 
         for channel in &mut channels {
             channel.pump_all().unwrap();
@@ -611,7 +741,7 @@ mod tests {
             .receiver
             .recv_blocking()
             .unwrap();
-        let message = u8::decode(&mut packet.as_slice()).unwrap();
+        let message = u8::decode(&mut packet.data.as_slice()).unwrap();
         assert_eq!(message, 42u8);
 
         let mut packet = Vec::new();
@@ -621,14 +751,17 @@ mod tests {
             .get(&ChannelId::new(0))
             .unwrap()
             .sender
-            .send(packet)
+            .send(ProtocolPacketData {
+                data: packet,
+                recepients: Default::default(),
+            })
             .unwrap();
 
         for channel in &mut channels {
             channel.pump_all().unwrap();
         }
 
-        let received_message = peer.recv::<u8>(ChannelId::new(0)).unwrap().unwrap();
-        assert_eq!(received_message, 100u8);
+        let received_message = events.receiver.recv_blocking().unwrap();
+        assert_eq!(received_message.message, 100u8);
     }
 }
