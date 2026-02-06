@@ -77,6 +77,10 @@ impl<T> Receiver<T> {
         self.0.is_disconnected()
     }
 
+    pub fn discard(&self) {
+        while self.try_recv().is_some() {}
+    }
+
     pub fn recv(&self) -> Result<Option<T>, Box<dyn Error>> {
         match self.0.try_recv() {
             Ok(value) => Ok(Some(value)),

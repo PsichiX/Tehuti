@@ -1,0 +1,345 @@
+use crossterm::event::KeyCode;
+use examples::{tcp::tcp_example, terminal::Terminal, utils::is_key};
+use rand::random_range;
+use std::{collections::HashMap, error::Error, net::SocketAddr, time::Duration};
+use tehuti::{
+    channel::{ChannelId, ChannelMode},
+    codec::postcard::PostcardCodec,
+    event::{Receiver, unbounded},
+    meeting::MeetingInterface,
+    peer::{Peer, PeerBuilder, PeerId, PeerRoleId, TypedPeer},
+    replica::{Replica, ReplicaApplyChanges, ReplicaCollectChanges, ReplicaId, ReplicationBuffer},
+    replication::HashReplicated,
+};
+use tehuti_client_server::{
+    authority::Authority,
+    controller::{Controller, ControllerEvent},
+    puppet::{Puppet, Puppetable},
+};
+
+const ADDRESS: &str = "127.0.0.1:8888";
+const PLAYER_EVENT_CHANNEL: ChannelId = ChannelId::new(0);
+const PLAYER_CHANGE_CHANNEL: ChannelId = ChannelId::new(1);
+const PLAYER_RPC_CHANNEL: ChannelId = ChannelId::new(2);
+const WORLD_SIZE: (i32, i32) = (20, 10);
+
+fn main() -> Result<(), Box<dyn Error>> {
+    println!("Are you hosting a server? (y/n): ");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+    let is_server = input.trim().to_lowercase() == "y";
+
+    let factory = Authority::peer_factory(is_server)?.with_typed::<PlayerController>();
+
+    tcp_example(is_server, ADDRESS, factory.into(), app)?;
+    Ok(())
+}
+
+fn app(
+    is_server: bool,
+    meeting: MeetingInterface,
+    local_addr: SocketAddr,
+) -> Result<(), Box<dyn Error>> {
+    println!("Starting game at local address: {}", local_addr);
+
+    let mut game = Game::new(is_server, meeting)?;
+    let mut terminal = Terminal::default();
+
+    // Main game loop.
+    loop {
+        if !game.tick()? {
+            break;
+        }
+
+        let events = Terminal::events().collect::<Vec<_>>();
+        if is_key(&events, KeyCode::Esc, None) {
+            break;
+        }
+
+        // Make local character move using arrow keys.
+        // Its position will be replicated to its peer on other side.
+        if let Some(character) = game.local_character_mut() {
+            if is_key(&events, KeyCode::Left, None) {
+                character.position.0 -= 1;
+            }
+            if is_key(&events, KeyCode::Right, None) {
+                character.position.0 += 1;
+            }
+            if is_key(&events, KeyCode::Up, None) {
+                character.position.1 -= 1;
+            }
+            if is_key(&events, KeyCode::Down, None) {
+                character.position.1 += 1;
+            }
+            character.position.0 = character.position.0.clamp(0, WORLD_SIZE.0 - 1);
+            character.position.1 = character.position.1.clamp(0, WORLD_SIZE.1 - 1);
+        }
+
+        terminal.begin_draw(true);
+
+        // Draw world border.
+        for x in 0..WORLD_SIZE.0 + 2 {
+            terminal.display([x as u16, 0], "#");
+        }
+        for x in 0..WORLD_SIZE.0 + 2 {
+            terminal.display([x as u16, WORLD_SIZE.1 as u16 + 1], "#");
+        }
+        for y in 0..WORLD_SIZE.1 + 2 {
+            terminal.display([0, y as u16], "#");
+        }
+        for y in 0..WORLD_SIZE.1 + 2 {
+            terminal.display([WORLD_SIZE.0 as u16 + 1, y as u16], "#");
+        }
+
+        // Draw characters as their peer ID number.
+        for (_, character) in game.characters() {
+            let (x, y) = *character.position;
+
+            if x >= 0 && y >= 0 && x < WORLD_SIZE.0 && y < WORLD_SIZE.1 {
+                terminal.display(
+                    [x as u16 + 1, y as u16 + 1],
+                    character.peer_id.id().to_string(),
+                );
+            }
+        }
+
+        terminal.end_draw();
+
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    // Don't let the game drop too early.
+    drop(game);
+    Ok(())
+}
+
+// Container holding game state such as communication authority and players.
+struct Game {
+    authority: Authority,
+    added_peers_receiver: Receiver<Peer>,
+    removed_peers_receiver: Receiver<PeerId>,
+    players: HashMap<PeerId, Player>,
+}
+
+impl Game {
+    fn new(is_server: bool, meeting: MeetingInterface) -> Result<Self, Box<dyn Error>> {
+        let (added_peers_sender, added_peers_receiver) = unbounded();
+        let (removed_peers_sender, removed_peers_receiver) = unbounded();
+
+        // Create authority and wait until it is initialized.
+        let mut authority =
+            Authority::new(is_server, meeting, added_peers_sender, removed_peers_sender)?;
+
+        while !authority.is_initialized() {
+            authority.maintain()?;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        // Create peer representing local player controller.
+        authority.create_peer(PlayerController::ROLE_ID)?;
+
+        Ok(Self {
+            authority,
+            added_peers_receiver,
+            removed_peers_receiver,
+            players: Default::default(),
+        })
+    }
+
+    fn characters(&self) -> impl Iterator<Item = (bool, &Puppet<Character>)> {
+        self.players.values().filter_map(|player| {
+            player
+                .character
+                .as_ref()
+                .map(|puppet| (!player.controller.info().remote, puppet))
+        })
+    }
+
+    fn local_character_mut(&mut self) -> Option<&mut Puppet<Character>> {
+        self.players
+            .values_mut()
+            .filter_map(|player| {
+                player
+                    .character
+                    .as_mut()
+                    .map(|puppet| (!player.controller.info().remote, puppet))
+            })
+            .find(|(is_local, _)| *is_local)
+            .map(|(_, character)| character)
+    }
+
+    fn tick(&mut self) -> Result<bool, Box<dyn Error>> {
+        // Authority internally is just an event pump and so it needs to be
+        // maintained every tick to work properly.
+        self.authority.maintain()?;
+        if !self.authority.is_initialized() {
+            return Ok(false);
+        }
+
+        // Handle player peers added to meeting.
+        for peer in self.added_peers_receiver.iter() {
+            let (replica_added_sender, replica_added_receiver) = unbounded();
+            let (replica_removed_sender, replica_removed_receiver) = unbounded();
+
+            // Create controller for the peer.
+            // Controllers are client-server representation of peers, that help
+            // handle automated and correct replication across machines.
+            let mut controller = Controller::new(
+                peer,
+                PLAYER_EVENT_CHANNEL,
+                Some(PLAYER_CHANGE_CHANNEL),
+                Some(PLAYER_RPC_CHANNEL),
+                replica_added_sender,
+                replica_removed_sender,
+            )?;
+            // Create replica for the controller to replicate its character state.
+            controller.create_replica(&mut self.authority)?;
+
+            self.players.insert(
+                controller.info().peer_id,
+                Player {
+                    controller,
+                    character: None,
+                    replica_added_receiver,
+                    replica_removed_receiver,
+                },
+            );
+        }
+
+        // Handle player peers removed from meeting.
+        for peer_id in self.removed_peers_receiver.iter() {
+            self.players.remove(&peer_id);
+        }
+
+        // Tick all players to maintain their controllers and characters.
+        for player in self.players.values_mut() {
+            player.tick()?;
+        }
+
+        Ok(true)
+    }
+}
+
+// Container holding player state such as controller and character puppet.
+struct Player {
+    controller: Controller,
+    character: Option<Puppet<Character>>,
+    replica_added_receiver: Receiver<Replica>,
+    replica_removed_receiver: Receiver<ReplicaId>,
+}
+
+impl Player {
+    fn tick(&mut self) -> Result<(), Box<dyn Error>> {
+        self.controller.maintain()?;
+
+        // Since our game assumes the only puppets controller can have is player
+        // character, we can directly create puppet when we get any its replica.
+        for replica in self.replica_added_receiver.iter() {
+            let position = (
+                random_range(2..WORLD_SIZE.0 - 2),
+                random_range(2..WORLD_SIZE.1 - 2),
+            );
+
+            // Create a new character puppet for player's replica.
+            // Puppets are client-server representation of replicas, that help
+            // handle automated replication of their state across machines.
+            self.character = Some(Puppet::new(
+                replica,
+                Character {
+                    peer_id: self.controller.info().peer_id,
+                    position: HashReplicated::new(position),
+                },
+            ));
+        }
+
+        // Since our game assumes the only puppets controller can have is player
+        // character, we can directly remove puppet when we get any replica removed.
+        for _ in self.replica_removed_receiver.iter() {
+            self.character = None;
+        }
+
+        // Perform automatic replication for character puppet.
+        if let Some(puppet) = &mut self.character {
+            puppet.replicate()?;
+        }
+
+        Ok(())
+    }
+}
+
+// Player controller role definition.
+struct PlayerController;
+
+impl TypedPeer for PlayerController {
+    // Since role ID 0 is reserved for authority, we should start with 1.
+    const ROLE_ID: PeerRoleId = PeerRoleId::new(1);
+
+    fn builder(builder: PeerBuilder) -> PeerBuilder {
+        if builder.info().remote {
+            builder
+                // Controller events should always be read and write, since they
+                // are used for internal controller synchronization.
+                .bind_read_write::<PostcardCodec<ControllerEvent>, ControllerEvent>(
+                    PLAYER_EVENT_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
+                )
+                // Change channels should be read-only on remote for simulation.
+                .bind_read::<ReplicationBuffer, ReplicationBuffer>(
+                    PLAYER_CHANGE_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
+                )
+                // RPC channels should be read-only on remote for simulation.
+                .bind_read::<ReplicationBuffer, ReplicationBuffer>(
+                    PLAYER_RPC_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
+                )
+        } else {
+            builder
+                .bind_read_write::<PostcardCodec<ControllerEvent>, ControllerEvent>(
+                    PLAYER_EVENT_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
+                )
+                // Change channels should be write-only on local for authority.
+                .bind_write::<ReplicationBuffer, ReplicationBuffer>(
+                    PLAYER_CHANGE_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
+                )
+                // RPC channels should be write-only on local for authority.
+                .bind_write::<ReplicationBuffer, ReplicationBuffer>(
+                    PLAYER_RPC_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
+                )
+        }
+    }
+}
+
+// Character puppet definition.
+struct Character {
+    peer_id: PeerId,
+    // Position is replicated across machines and automatically synchronized by
+    // owning puppet.
+    position: HashReplicated<(i32, i32)>,
+}
+
+impl Puppetable for Character {
+    // Here we collect changes to be replicated to other machines.
+    fn collect_changes(
+        &mut self,
+        mut collector: ReplicaCollectChanges,
+    ) -> Result<(), Box<dyn Error>> {
+        collector.collect_replicated(&mut self.position)?;
+        Ok(())
+    }
+
+    // Here we apply changes replicated from other machines.
+    fn apply_changes(&mut self, mut applicator: ReplicaApplyChanges) -> Result<(), Box<dyn Error>> {
+        applicator.apply_replicated(&mut self.position)?;
+        Ok(())
+    }
+}

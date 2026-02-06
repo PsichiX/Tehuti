@@ -1,15 +1,17 @@
 [package]
 name = "examples"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
 publish = false
 
 [dependencies]
-tehuti = { version = "0.9", path = "../_", features = ["postcard"] }
-tehuti-mock = { version = "0.9", path = "../mock" }
-tehuti-socket = { version = "0.9", path = "../socket" }
+tehuti = { version = "0.10", path = "../_", features = ["postcard"] }
+tehuti-mock = { version = "0.10", path = "../mock" }
+tehuti-socket = { version = "0.10", path = "../socket" }
+tehuti-client-server = { version = "0.10", path = "../client-server" }
 serde = { version = "1", features = ["derive"] }
 crossterm = "0.29"
 textwrap = "0.16"
 vek = "0.17"
+rand = "0.9"

@@ -1,8 +1,10 @@
 use crate::{
     channel::{ChannelId, Dispatch},
     codec::Codec,
+    engine::EngineId,
     event::{Duplex, Receiver, Sender, unbounded},
     peer::Peer,
+    protocol::{PacketRecepients, ProtocolPacketData},
     replication::{
         BufferRead, BufferWrite, Replicable, Replicated, ReplicationPolicy,
         rpc::{Rpc, RpcPartialDecoder},
@@ -85,10 +87,10 @@ impl Codec for ReplicationBuffer {
 }
 
 struct ReplicaInstance {
-    change_sender: Option<Sender<Vec<u8>>>,
-    change_receiver: Option<Receiver<Vec<u8>>>,
-    rpc_sender: Option<Sender<Vec<u8>>>,
-    rpc_receiver: Option<Receiver<Vec<u8>>>,
+    change_sender: Option<Sender<ProtocolPacketData>>,
+    change_receiver: Option<Receiver<ProtocolPacketData>>,
+    rpc_sender: Option<Sender<ProtocolPacketData>>,
+    rpc_receiver: Option<Receiver<ProtocolPacketData>>,
 }
 
 pub struct ReplicaSet {
@@ -141,11 +143,11 @@ impl ReplicaSet {
         })
     }
 
-    pub fn destroy(&mut self, id: &ReplicaId) {
-        self.instances.remove(id);
+    pub fn destroy(&mut self, id: &ReplicaId) -> bool {
+        self.instances.remove(id).is_some()
     }
 
-    pub fn does_exist(&self, id: &ReplicaId) -> bool {
+    pub fn has(&self, id: &ReplicaId) -> bool {
         self.instances.contains_key(id)
     }
 
@@ -160,48 +162,62 @@ impl ReplicaSet {
         if let Some(change_sender) = &self.change_sender {
             for (replica_id, instance) in &self.instances {
                 if let Some(receiver) = &instance.change_receiver {
-                    for buffer in receiver.iter() {
-                        let _ = change_sender.send(
-                            ReplicationBuffer {
+                    for ProtocolPacketData { data, recepients } in receiver.iter() {
+                        let _ = change_sender.send(Dispatch {
+                            message: ReplicationBuffer {
                                 replica_id: *replica_id,
-                                buffer,
-                            }
-                            .into(),
-                        );
+                                buffer: data,
+                            },
+                            recepients,
+                        });
                     }
                 }
             }
         }
         if let Some(change_receiver) = &self.change_receiver {
-            for buffer in change_receiver.iter() {
-                if let Some(instance) = self.instances.get_mut(&buffer.message.replica_id)
+            for Dispatch {
+                message,
+                recepients,
+            } in change_receiver.iter()
+            {
+                if let Some(instance) = self.instances.get_mut(&message.replica_id)
                     && let Some(sender) = &instance.change_sender
                 {
-                    let _ = sender.send(buffer.message.buffer);
+                    let _ = sender.send(ProtocolPacketData {
+                        data: message.buffer,
+                        recepients,
+                    });
                 }
             }
         }
         if let Some(rpc_sender) = &self.rpc_sender {
             for (replica_id, instance) in &self.instances {
                 if let Some(receiver) = &instance.rpc_receiver {
-                    for buffer in receiver.iter() {
-                        let _ = rpc_sender.send(
-                            ReplicationBuffer {
+                    for ProtocolPacketData { data, recepients } in receiver.iter() {
+                        let _ = rpc_sender.send(Dispatch {
+                            message: ReplicationBuffer {
                                 replica_id: *replica_id,
-                                buffer,
-                            }
-                            .into(),
-                        );
+                                buffer: data,
+                            },
+                            recepients,
+                        });
                     }
                 }
             }
         }
         if let Some(rpc_receiver) = &self.rpc_receiver {
-            for buffer in rpc_receiver.iter() {
-                if let Some(instance) = self.instances.get_mut(&buffer.message.replica_id)
+            for Dispatch {
+                message,
+                recepients,
+            } in rpc_receiver.iter()
+            {
+                if let Some(instance) = self.instances.get_mut(&message.replica_id)
                     && let Some(sender) = &instance.rpc_sender
                 {
-                    let _ = sender.send(buffer.message.buffer);
+                    let _ = sender.send(ProtocolPacketData {
+                        data: message.buffer,
+                        recepients,
+                    });
                 }
             }
         }
@@ -270,10 +286,21 @@ impl ReplicaSet {
 }
 
 pub struct ReplicaRpcSender {
-    sender: Sender<Vec<u8>>,
+    sender: Sender<ProtocolPacketData>,
+    recepients: PacketRecepients,
 }
 
 impl ReplicaRpcSender {
+    pub fn recepient(mut self, engine_id: EngineId) -> Self {
+        self.recepients.push(engine_id);
+        self
+    }
+
+    pub fn recepients(mut self, engine_ids: impl IntoIterator<Item = EngineId>) -> Self {
+        self.recepients.extend(engine_ids);
+        self
+    }
+
     pub fn send<Output, Input>(&self, rpc: Rpc<Output, Input>) -> Result<(), Box<dyn Error>>
     where
         Output: Codec + Sized,
@@ -281,7 +308,10 @@ impl ReplicaRpcSender {
     {
         let mut buffer: Vec<u8> = Vec::new();
         rpc.encode(&mut buffer)?;
-        self.sender.send(buffer)?;
+        self.sender.send(ProtocolPacketData {
+            data: buffer,
+            recepients: self.recepients.clone(),
+        })?;
         Ok(())
     }
 }
@@ -289,10 +319,10 @@ impl ReplicaRpcSender {
 #[derive(Debug)]
 pub struct Replica {
     id: ReplicaId,
-    change_sender: Option<Sender<Vec<u8>>>,
-    change_receiver: Option<Receiver<Vec<u8>>>,
-    rpc_sender: Option<Sender<Vec<u8>>>,
-    rpc_receiver: Option<Receiver<Vec<u8>>>,
+    change_sender: Option<Sender<ProtocolPacketData>>,
+    change_receiver: Option<Receiver<ProtocolPacketData>>,
+    rpc_sender: Option<Sender<ProtocolPacketData>>,
+    rpc_receiver: Option<Receiver<ProtocolPacketData>>,
     killed_sender: Sender<ReplicaId>,
 }
 
@@ -318,19 +348,21 @@ impl Replica {
     pub fn rpc_sender(&self) -> Option<ReplicaRpcSender> {
         self.rpc_sender.as_ref().map(|sender| ReplicaRpcSender {
             sender: sender.clone(),
+            recepients: Default::default(),
         })
     }
 
     pub fn rpc_receive(&self) -> Option<Result<RpcPartialDecoder, Box<dyn Error>>> {
         let receiver = self.rpc_receiver.as_ref()?;
         let buffer = receiver.try_recv()?;
-        Some(RpcPartialDecoder::new(buffer))
+        Some(RpcPartialDecoder::new(buffer.data))
     }
 }
 
 pub struct ReplicaCollectChanges {
-    sender: Sender<Vec<u8>>,
+    sender: Sender<ProtocolPacketData>,
     buffer: Option<Cursor<Vec<u8>>>,
+    recepients: PacketRecepients,
 }
 
 impl Drop for ReplicaCollectChanges {
@@ -338,7 +370,10 @@ impl Drop for ReplicaCollectChanges {
         if let Some(buffer) = self.buffer.take() {
             let buffer = buffer.into_inner();
             if !buffer.is_empty() {
-                let _ = self.sender.send(buffer);
+                let _ = self.sender.send(ProtocolPacketData {
+                    data: buffer,
+                    recepients: self.recepients.clone(),
+                });
             }
         }
     }
@@ -349,6 +384,7 @@ impl ReplicaCollectChanges {
         Some(Self {
             sender: replica.change_sender.as_ref().cloned()?,
             buffer: Some(Default::default()),
+            recepients: Default::default(),
         })
     }
 
@@ -357,6 +393,16 @@ impl ReplicaCollectChanges {
             .as_ref()
             .map(|b| b.get_ref().len())
             .unwrap_or_default()
+    }
+
+    pub fn recepient(mut self, engine_id: EngineId) -> Self {
+        self.recepients.push(engine_id);
+        self
+    }
+
+    pub fn recepients(mut self, engine_ids: impl IntoIterator<Item = EngineId>) -> Self {
+        self.recepients.extend(engine_ids);
+        self
     }
 
     pub fn collect_replicated<P, T>(
@@ -392,7 +438,9 @@ pub struct ReplicaApplyChanges {
 impl ReplicaApplyChanges {
     pub fn new(replica: &Replica) -> Option<Self> {
         if let Some(receiver) = &replica.change_receiver {
-            receiver.try_recv().map(|buffer| Self { buffer })
+            receiver.try_recv().map(|buffer| Self {
+                buffer: buffer.data,
+            })
         } else {
             None
         }

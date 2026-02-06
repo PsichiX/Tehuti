@@ -200,7 +200,7 @@ impl Peer {
         &self.info
     }
 
-    pub(crate) fn sender<Message: Send + 'static>(
+    pub fn sender<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
     ) -> Result<&Sender<Dispatch<Message>>, Box<dyn Error>> {
@@ -222,7 +222,7 @@ impl Peer {
             })
     }
 
-    pub(crate) fn receiver<Message: Send + 'static>(
+    pub fn receiver<Message: Send + 'static>(
         &self,
         channel_id: ChannelId,
     ) -> Result<&Receiver<Dispatch<Message>>, Box<dyn Error>> {
@@ -532,7 +532,14 @@ pub trait TypedPeer: Sized {
         builder
     }
 
-    fn into_typed(peer: PeerDestructurer) -> Result<Self, Box<dyn Error>>;
+    #[allow(unused_variables)]
+    fn into_typed(peer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
+        Err(format!(
+            "TypedPeer::into_typed not implemented for role id {}",
+            Self::ROLE_ID
+        )
+        .into())
+    }
 }
 
 pub struct PeerDestructurer {

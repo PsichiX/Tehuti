@@ -39,6 +39,7 @@ update:
   cargo update --manifest-path ./crates/_/Cargo.toml --aggressive
   cargo update --manifest-path ./crates/mock/Cargo.toml --aggressive
   cargo update --manifest-path ./crates/socket/Cargo.toml --aggressive
+  cargo update --manifest-path ./crates/client-server/Cargo.toml --aggressive
   
 # book:
 #   mdbook build book
@@ -65,3 +66,5 @@ publish:
   cargo publish --no-verify --manifest-path ./crates/mock/Cargo.toml
   sleep 1
   cargo publish --no-verify --manifest-path ./crates/socket/Cargo.toml
+  sleep 1
+  cargo publish --no-verify --manifest-path ./crates/client-server/Cargo.toml
