@@ -1,10 +1,19 @@
-use crate::codec::Codec;
+use crate::{
+    codec::Codec,
+    replication::{CodecReplicated, HashRep, ManRep, MutRep},
+};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     error::Error,
     io::{Read, Write},
     marker::PhantomData,
 };
+
+pub type PostcardReplicated<P, T> = CodecReplicated<P, T, PostcardCodec<T>>;
+pub type FullPostcardReplicated<T> = PostcardReplicated<(), T>;
+pub type HashPostcardReplicated<T> = PostcardReplicated<HashRep, T>;
+pub type MutPostcardReplicated<T> = PostcardReplicated<MutRep, T>;
+pub type ManPostcardReplicated<T> = PostcardReplicated<ManRep, T>;
 
 pub struct PostcardCodec<T>(PhantomData<T>);
 

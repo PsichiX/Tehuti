@@ -6,7 +6,11 @@ use tehuti::replica::{Replica, ReplicaApplyChanges, ReplicaCollectChanges};
 
 pub trait Puppetable {
     #[allow(unused_variables)]
-    fn collect_changes(&mut self, collector: ReplicaCollectChanges) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(
+        &mut self,
+        collector: ReplicaCollectChanges,
+        full_snapshot: bool,
+    ) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
@@ -19,11 +23,16 @@ pub trait Puppetable {
 pub struct Puppet<T: Puppetable> {
     replica: Replica,
     data: T,
+    request_full_snapshot: bool,
 }
 
 impl<T: Puppetable> Puppet<T> {
     pub fn new(replica: Replica, data: T) -> Self {
-        Self { replica, data }
+        Self {
+            replica,
+            data,
+            request_full_snapshot: true,
+        }
     }
 
     pub fn replica(&self) -> &Replica {
@@ -35,9 +44,15 @@ impl<T: Puppetable> Puppet<T> {
             self.data.apply_changes(applicator)?;
         }
         if let Some(collector) = self.replica.collect_changes() {
-            self.data.collect_changes(collector)?;
+            self.data
+                .collect_changes(collector, self.request_full_snapshot)?;
+            self.request_full_snapshot = false;
         }
         Ok(())
+    }
+
+    pub fn request_full_snapshot(&mut self) {
+        self.request_full_snapshot = true;
     }
 }
 

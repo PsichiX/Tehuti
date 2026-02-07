@@ -15,10 +15,12 @@ use std::{
 
 pub type BufferWrite = Cursor<Vec<u8>>;
 pub type BufferRead<'a> = Cursor<&'a [u8]>;
+pub type FullReplicated<T> = Replicated<(), T>;
 pub type HashReplicated<T> = Replicated<HashRep, T>;
 pub type MutReplicated<T> = Replicated<MutRep, T>;
 pub type ManReplicated<T> = Replicated<ManRep, T>;
 pub type CodecReplicated<P, T, C> = Replicated<P, CodecRep<T, C>>;
+pub type FullCodecReplicated<T, C> = CodecReplicated<(), T, C>;
 pub type HashCodecReplicated<T, C> = CodecReplicated<HashRep, T, C>;
 pub type MutCodecReplicated<T, C> = CodecReplicated<MutRep, T, C>;
 pub type ManCodecReplicated<T, C> = CodecReplicated<ManRep, T, C>;
@@ -47,6 +49,15 @@ where
         let hash = crate::hash(data);
         self.0 = hash;
         old_hash != self.0
+    }
+}
+
+impl<T> ReplicationPolicy<T> for ()
+where
+    T: Replicable,
+{
+    fn detect_change(&mut self, _data: &T) -> bool {
+        true
     }
 }
 

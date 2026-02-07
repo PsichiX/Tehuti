@@ -419,9 +419,8 @@ impl ReplicaCollectChanges {
         Ok(())
     }
 
-    pub fn collect_replicable<P, T>(&mut self, replicable: &T) -> Result<(), Box<dyn Error>>
+    pub fn collect_replicable<T>(&mut self, replicable: &T) -> Result<(), Box<dyn Error>>
     where
-        P: ReplicationPolicy<T>,
         T: Replicable,
     {
         if let Some(buffer) = &mut self.buffer {

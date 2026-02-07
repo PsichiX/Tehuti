@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{Event, KeyCode};
 use examples::{tcp::tcp_example, terminal::Terminal, utils::is_key};
 use rand::random_range;
 use std::{collections::HashMap, error::Error, net::SocketAddr, time::Duration};
@@ -56,54 +56,8 @@ fn app(
             break;
         }
 
-        // Make local character move using arrow keys.
-        // Its position will be replicated to its peer on other side.
-        if let Some(character) = game.local_character_mut() {
-            if is_key(&events, KeyCode::Left, None) {
-                character.position.0 -= 1;
-            }
-            if is_key(&events, KeyCode::Right, None) {
-                character.position.0 += 1;
-            }
-            if is_key(&events, KeyCode::Up, None) {
-                character.position.1 -= 1;
-            }
-            if is_key(&events, KeyCode::Down, None) {
-                character.position.1 += 1;
-            }
-            character.position.0 = character.position.0.clamp(0, WORLD_SIZE.0 - 1);
-            character.position.1 = character.position.1.clamp(0, WORLD_SIZE.1 - 1);
-        }
-
-        terminal.begin_draw(true);
-
-        // Draw world border.
-        for x in 0..WORLD_SIZE.0 + 2 {
-            terminal.display([x as u16, 0], "#");
-        }
-        for x in 0..WORLD_SIZE.0 + 2 {
-            terminal.display([x as u16, WORLD_SIZE.1 as u16 + 1], "#");
-        }
-        for y in 0..WORLD_SIZE.1 + 2 {
-            terminal.display([0, y as u16], "#");
-        }
-        for y in 0..WORLD_SIZE.1 + 2 {
-            terminal.display([WORLD_SIZE.0 as u16 + 1, y as u16], "#");
-        }
-
-        // Draw characters as their peer ID number.
-        for (_, character) in game.characters() {
-            let (x, y) = *character.position;
-
-            if x >= 0 && y >= 0 && x < WORLD_SIZE.0 && y < WORLD_SIZE.1 {
-                terminal.display(
-                    [x as u16 + 1, y as u16 + 1],
-                    character.peer_id.id().to_string(),
-                );
-            }
-        }
-
-        terminal.end_draw();
+        game.handle_events(&events);
+        game.draw(&mut terminal);
 
         std::thread::sleep(Duration::from_millis(150));
     }
@@ -144,6 +98,59 @@ impl Game {
             removed_peers_receiver,
             players: Default::default(),
         })
+    }
+
+    fn handle_events(&mut self, events: &[Event]) {
+        // Make local character move using arrow keys.
+        // Its position will be replicated to its peer on other side.
+        if let Some(character) = self.local_character_mut() {
+            if is_key(events, KeyCode::Left, None) {
+                character.position.0 -= 1;
+            }
+            if is_key(events, KeyCode::Right, None) {
+                character.position.0 += 1;
+            }
+            if is_key(events, KeyCode::Up, None) {
+                character.position.1 -= 1;
+            }
+            if is_key(events, KeyCode::Down, None) {
+                character.position.1 += 1;
+            }
+            character.position.0 = character.position.0.clamp(0, WORLD_SIZE.0 - 1);
+            character.position.1 = character.position.1.clamp(0, WORLD_SIZE.1 - 1);
+        }
+    }
+
+    fn draw(&self, terminal: &mut Terminal) {
+        terminal.begin_draw(true);
+
+        // Draw world border.
+        for x in 0..WORLD_SIZE.0 + 2 {
+            terminal.display([x as u16, 0], "#");
+        }
+        for x in 0..WORLD_SIZE.0 + 2 {
+            terminal.display([x as u16, WORLD_SIZE.1 as u16 + 1], "#");
+        }
+        for y in 0..WORLD_SIZE.1 + 2 {
+            terminal.display([0, y as u16], "#");
+        }
+        for y in 0..WORLD_SIZE.1 + 2 {
+            terminal.display([WORLD_SIZE.0 as u16 + 1, y as u16], "#");
+        }
+
+        // Draw characters as their peer ID number.
+        for (_, character) in self.characters() {
+            let (x, y) = *character.position;
+
+            if x >= 0 && y >= 0 && x < WORLD_SIZE.0 && y < WORLD_SIZE.1 {
+                terminal.display(
+                    [x as u16 + 1, y as u16 + 1],
+                    character.peer_id.id().to_string(),
+                );
+            }
+        }
+
+        terminal.end_draw();
     }
 
     fn characters(&self) -> impl Iterator<Item = (bool, &Puppet<Character>)> {
@@ -195,6 +202,14 @@ impl Game {
             // Create replica for the controller to replicate its character state.
             controller.create_replica(&mut self.authority)?;
 
+            // Request full snapshot replication of existing characters to new
+            // controllers puppets on the other side to initialize their state.
+            for player in self.players.values_mut() {
+                if let Some(character) = &mut player.character {
+                    character.request_full_snapshot();
+                }
+            }
+
             self.players.insert(
                 controller.info().peer_id,
                 Player {
@@ -240,7 +255,8 @@ impl Player {
                 random_range(2..WORLD_SIZE.1 - 2),
             );
 
-            // Create a new character puppet for player's replica.
+            // Create a new character puppet for player's replica and send its
+            // initial full snapshot.
             // Puppets are client-server representation of replicas, that help
             // handle automated replication of their state across machines.
             self.character = Some(Puppet::new(
@@ -332,8 +348,19 @@ impl Puppetable for Character {
     fn collect_changes(
         &mut self,
         mut collector: ReplicaCollectChanges,
+        full_snapshot: bool,
     ) -> Result<(), Box<dyn Error>> {
-        collector.collect_replicated(&mut self.position)?;
+        if full_snapshot {
+            // If full snapshot is requested, we need to collect the whole state
+            // of the puppet, by collecting replicable state, which doesn't care
+            // about change tracking and just replicates full state.
+            collector.collect_replicable(&*self.position)?;
+        } else {
+            // If full snapshot is not requested, we can just collect the changes
+            // since last replication, by collecting replicated state, which
+            // tracks changes using replication policy (hashed in our character).
+            collector.collect_replicated(&mut self.position)?;
+        }
         Ok(())
     }
 
