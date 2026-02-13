@@ -769,23 +769,26 @@ mod tests {
     use tehuti::{
         channel::{ChannelId, ChannelMode, Dispatch},
         meeting::MeetingUserEvent,
-        peer::{PeerBuilder, PeerDestructurer, PeerRoleId, TypedPeer},
+        peer::{PeerBuilder, PeerDestructurer, PeerRoleId, TypedPeer, TypedPeerRole},
     };
     use tehuti_mock::{mock_env_tracing, mock_recv_matching};
+    use tracing::level_filters::LevelFilter;
 
     struct Chatter {
         pub messages: Duplex<Dispatch<String>>,
     }
 
-    impl TypedPeer for Chatter {
+    impl TypedPeerRole for Chatter {
         const ROLE_ID: PeerRoleId = PeerRoleId::new(0);
+    }
 
-        fn builder(builder: PeerBuilder) -> PeerBuilder {
-            builder.bind_read_write::<String, String>(
+    impl TypedPeer for Chatter {
+        fn builder(builder: PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> {
+            Ok(builder.bind_read_write::<String, String>(
                 ChannelId::new(0),
                 ChannelMode::ReliableOrdered,
                 None,
-            )
+            ))
         }
 
         fn into_typed(mut destructurer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
@@ -797,7 +800,7 @@ mod tests {
 
     #[test]
     fn test_tcp_connection() {
-        mock_env_tracing();
+        mock_env_tracing(LevelFilter::TRACE);
 
         let server_thread = spawn(|| {
             let factory =

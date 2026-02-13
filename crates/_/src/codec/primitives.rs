@@ -24,6 +24,7 @@ impl Codec for bool {
     }
 }
 
+// TODO: use leb128 varints encoding for better compression of small numbers!
 macro_rules! impl_codec_for_pod {
     ($($t:ty),* $(,)?) => {
         $(

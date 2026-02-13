@@ -8,8 +8,11 @@ use crossterm::{
         enable_raw_mode,
     },
 };
-use std::{fmt::Display, io::Stdout, time::Duration};
+use std::{fmt::Display, io::Stdout, sync::OnceLock, time::Duration};
+use tehuti_diagnostics::log_buffer::LogBuffer;
 use vek::Vec2;
+
+static LOG_BUFFER: OnceLock<LogBuffer> = OnceLock::new();
 
 pub struct Terminal {
     output: Stdout,
@@ -31,6 +34,48 @@ impl Default for Terminal {
 }
 
 impl Terminal {
+    pub fn set_global_log_buffer(buffer: LogBuffer) {
+        LOG_BUFFER
+            .set(buffer)
+            .ok()
+            .expect("Global log buffer can only be set once");
+    }
+
+    pub fn global_log_buffer() -> Option<&'static LogBuffer> {
+        LOG_BUFFER.get()
+    }
+
+    pub fn draw_global_log_buffer_region(
+        &mut self,
+        location: impl Into<Vec2<u16>>,
+        size: impl Into<Vec2<u16>>,
+    ) {
+        if let Some(log_buffer) = Self::global_log_buffer() {
+            let location = location.into();
+            let size = size.into();
+
+            let logs = log_buffer.get_region(size.x as usize, size.y as usize);
+            for (i, line) in logs.lines().enumerate() {
+                self.display(location + Vec2::new(0, i as u16), line);
+            }
+        }
+    }
+
+    pub fn draw_text_region<D: Display>(
+        &mut self,
+        location: impl Into<Vec2<u16>>,
+        size: impl Into<Vec2<u16>>,
+        content: D,
+    ) {
+        let location = location.into();
+        let size = size.into();
+
+        let content = format!("{}", content);
+        for (i, line) in content.lines().take(size.y as usize).enumerate() {
+            self.display(location + Vec2::new(0, i as u16), line);
+        }
+    }
+
     pub fn new(mut output: Stdout) -> Self {
         enable_raw_mode().unwrap();
         execute!(output, EnterAlternateScreen).unwrap();

@@ -22,19 +22,26 @@ impl Replicable for bool {
     }
 }
 
+// TODO: use leb128 varints encoding for better compression of small numbers!
+// This will remove the need for separate Rep var int wrappers and make it more
+// ergonomic to use primitive types directly as replicables.
 macro_rules! impl_replicable_for_pod {
-    ($($t:ty),* $(,)?) => {
+    ($($t:ty => $mode:ident),* $(,)?) => {
         $(
             impl Replicable for $t {
-                fn collect_changes(&self, buffer: &mut $crate::replication::BufferWrite) -> Result<(), Box<dyn Error>> {
-                    buffer.write_all(&self.to_le_bytes())?;
+                fn collect_changes(
+                    &self,
+                    buffer: &mut $crate::replication::BufferWrite,
+                ) -> Result<(), Box<dyn Error>> {
+                    $crate::third_party::leb128::write::$mode(buffer, *self as _)?;
                     Ok(())
                 }
 
-                fn apply_changes(&mut self, buffer: &mut $crate::replication::BufferRead) -> Result<(), Box<dyn Error>> {
-                    let mut buf = [0u8; std::mem::size_of::<$t>()];
-                    buffer.read_exact(&mut buf)?;
-                    *self = <$t>::from_le_bytes(buf);
+                fn apply_changes(
+                    &mut self,
+                    buffer: &mut $crate::replication::BufferRead,
+                ) -> Result<(), Box<dyn Error>> {
+                    *self = $crate::third_party::leb128::read::$mode(buffer)? as _;
                     Ok(())
                 }
             }
@@ -43,8 +50,45 @@ macro_rules! impl_replicable_for_pod {
 }
 
 impl_replicable_for_pod!(
-    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64
+    u8 => unsigned,
+    u16 => unsigned,
+    u32 => unsigned,
+    u64 => unsigned,
+    u128 => unsigned,
+    usize => unsigned,
+    i8 => signed,
+    i16 => signed,
+    i32 => signed,
+    i64 => signed,
+    i128 => signed,
+    isize => signed,
 );
+
+impl Replicable for f32 {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        self.to_bits().collect_changes(buffer)
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        let mut bits = 0u32;
+        bits.apply_changes(buffer)?;
+        *self = f32::from_bits(bits);
+        Ok(())
+    }
+}
+
+impl Replicable for f64 {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        self.to_bits().collect_changes(buffer)
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        let mut bits = 0u64;
+        bits.apply_changes(buffer)?;
+        *self = f64::from_bits(bits);
+        Ok(())
+    }
+}
 
 impl Replicable for char {
     fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
@@ -82,7 +126,7 @@ impl Replicable for String {
     }
 }
 
-macro_rules! impl_float {
+macro_rules! impl_rep_float {
     ($( $wrap:ident => $type:ident ),+) => {
         $(
             #[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -140,70 +184,7 @@ macro_rules! impl_float {
         )+
     };
 }
-impl_float!(RepF32 => f32, RepF64 => f64);
-
-macro_rules! impl_var_int {
-    ($( $wrap:ident => $type:ident => $mode:ident ),+) => {
-        $(
-            #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-            pub struct $wrap(pub $type);
-
-            impl From<$type> for $wrap {
-                fn from(value: $type) -> Self {
-                    Self(value)
-                }
-            }
-
-            impl From<$wrap> for $type {
-                fn from(value: $wrap) -> Self {
-                    value.0
-                }
-            }
-
-            impl Deref for $wrap {
-                type Target = $type;
-
-                fn deref(&self) -> &Self::Target {
-                    &self.0
-                }
-            }
-
-            impl DerefMut for $wrap {
-                fn deref_mut(&mut self) -> &mut Self::Target {
-                    &mut self.0
-                }
-            }
-
-            impl $crate::replication::Replicable for $wrap {
-                fn collect_changes(
-                    &self,
-                    buffer: &mut $crate::replication::BufferWrite,
-                ) -> Result<(), Box<dyn Error>> {
-                    $crate::third_party::leb128::write::$mode(buffer, self.0 as _)?;
-                    Ok(())
-                }
-
-                fn apply_changes(
-                    &mut self,
-                    buffer: &mut $crate::replication::BufferRead,
-                ) -> Result<(), Box<dyn Error>> {
-                    self.0 = $crate::third_party::leb128::read::$mode(buffer)? as _;
-                    Ok(())
-                }
-            }
-        )+
-    };
-}
-impl_var_int!(
-    RepI16 => i16 => signed,
-    RepI32 => i32 => signed,
-    RepI64 => i64 => signed,
-    RepIsize => isize => signed,
-    RepU16 => u16 => unsigned,
-    RepU32 => u32 => unsigned,
-    RepU64 => u64 => unsigned,
-    RepUsize => usize => unsigned
-);
+impl_rep_float!(RepF32 => f32, RepF64 => f64);
 
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,

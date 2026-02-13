@@ -109,6 +109,10 @@ impl<T> Receiver<T> {
         std::iter::from_fn(|| self.try_recv())
     }
 
+    pub fn last(&self) -> Option<T> {
+        self.iter().last()
+    }
+
     pub fn len(&self) -> usize {
         self.0.len()
     }

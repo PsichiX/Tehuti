@@ -688,7 +688,7 @@ impl MockMachine {
     }
 }
 
-pub fn mock_env_tracing() {
+pub fn mock_env_tracing(filter_level: LevelFilter) {
     if cfg!(not(miri)) {
         use tracing_subscriber::{
             Layer, fmt::layer, layer::SubscriberExt, registry, util::SubscriberInitExt,
@@ -698,7 +698,7 @@ pub fn mock_env_tracing() {
             .with(
                 layer()
                     .with_writer(std::io::stdout)
-                    .with_filter(LevelFilter::TRACE),
+                    .with_filter(filter_level),
             )
             .init();
     }
@@ -746,7 +746,7 @@ mod tests {
         channel::{ChannelId, ChannelMode, Dispatch},
         event::Receiver,
         meeting::MeetingUserEvent,
-        peer::{PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
+        peer::{PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer, TypedPeerRole},
     };
 
     struct Chatter {
@@ -754,9 +754,11 @@ mod tests {
         pub receiver: Receiver<Dispatch<String>>,
     }
 
-    impl TypedPeer for Chatter {
+    impl TypedPeerRole for Chatter {
         const ROLE_ID: PeerRoleId = PeerRoleId::new(0);
+    }
 
+    impl TypedPeer for Chatter {
         fn into_typed(mut destructurer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
             let sender = destructurer.write::<String>(ChannelId::new(0))?;
             let receiver = destructurer.read::<String>(ChannelId::new(0))?;
@@ -766,7 +768,7 @@ mod tests {
 
     #[test]
     fn test_mock() {
-        mock_env_tracing();
+        mock_env_tracing(LevelFilter::TRACE);
 
         // Peers role id is used to tell what channels they have rights to read
         // and/or write. This mechanism replaces fixed roles commonly used in
@@ -777,11 +779,11 @@ mod tests {
         // them bounded, so when new message arrives and there is no more space,
         // oldest message is dropped.
         let factory = Arc::new(PeerFactory::default().with(PeerRoleId::new(0), |builder| {
-            builder.bind_read_write::<String, String>(
+            Ok(builder.bind_read_write::<String, String>(
                 ChannelId::new(0),
                 ChannelMode::ReliableOrdered,
                 None,
-            )
+            ))
         }));
 
         // Create network that will transmit messages between machines.

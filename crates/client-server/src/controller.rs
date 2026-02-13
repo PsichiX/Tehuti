@@ -7,7 +7,7 @@ use std::{
 use tehuti::{
     channel::{ChannelId, Dispatch},
     event::{Receiver, Sender, unbounded},
-    peer::Peer,
+    peer::{Peer, TypedPeer},
     replica::{Replica, ReplicaId, ReplicaSet},
 };
 
@@ -60,7 +60,10 @@ impl Controller {
         })
     }
 
-    pub fn create_replica(&mut self, authority: &mut Authority) -> Result<(), Box<dyn Error>> {
+    pub fn create_replica<Extension: TypedPeer>(
+        &mut self,
+        authority: &mut Authority<Extension>,
+    ) -> Result<(), Box<dyn Error>> {
         if self.peer.info().remote {
             return Ok(());
         }

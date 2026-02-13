@@ -1,4 +1,4 @@
-use examples::tcp::tcp_example;
+use samples::tcp::tcp_example;
 use std::{
     error::Error,
     net::SocketAddr,
@@ -9,17 +9,20 @@ use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
     event::{Receiver, Sender},
     meeting::{MeetingInterface, MeetingUserEvent},
-    peer::{PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
+    peer::{
+        PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer, TypedPeerRole,
+    },
     replica::{Replica, ReplicaId, ReplicaSet, ReplicationBuffer},
-    replication::rpc::Rpc,
+    replication::HashReplicated,
 };
 use tehuti_mock::mock_recv_matching;
 
 const ADDRESS: &str = "127.0.0.1:8888";
-const RPC_CHANNEL: ChannelId = ChannelId::new(0);
+const CHANGE_CHANNEL: ChannelId = ChannelId::new(0);
 
-type TickRpc = Rpc<(), u32>;
-
+/// Simple example demonstrating replication of a counter from an authority
+/// peer (server) to a simulated peer (client) over a TCP connection using
+/// Tehuti's meeting, peer, and replication primitives.
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Are you hosting a server? (y/n): ");
     let mut input = String::new();
@@ -57,18 +60,18 @@ fn app(
     // Create a replica set and bind it to the peer's replication channels.
     let mut replica_set = ReplicaSet::default();
     match &peer {
-        CounterRole::Authority { rpcs } => {
-            replica_set.bind_rpc_sender(rpcs.clone());
+        CounterRole::Authority { changes } => {
+            replica_set.bind_change_sender(changes.clone());
         }
-        CounterRole::Simulated { rpcs } => {
-            replica_set.bind_rpc_receiver(rpcs.clone());
+        CounterRole::Simulated { changes } => {
+            replica_set.bind_change_receiver(changes.clone());
         }
     }
 
     // Create a counter replica.
     let mut counter = Counter {
         replica: replica_set.create(ReplicaId::new(0))?,
-        value: 0,
+        value: HashReplicated::new(0),
     };
 
     let mut timer = Instant::now();
@@ -78,25 +81,28 @@ fn app(
             timer = Instant::now();
 
             if matches!(&peer, CounterRole::Authority { .. }) {
-                counter.value += 1;
+                *counter.value += 1;
 
-                println!("Tick counter: {}", counter.value);
-
-                // Send an RPC to notify the simulated peer of the tick.
-                if let Some(sender) = counter.replica.rpc_sender() {
-                    sender.send(TickRpc::new("tick", counter.value))?;
-                }
+                println!("Tick counter: {}", *counter.value);
             }
         }
 
-        // Simulated peer: receive tick RPCs and update the counter value.
-        if let Some(Ok(decoder)) = counter.replica.rpc_receive()
-            && decoder.procedure() == "tick"
-        {
-            let rpc = decoder.complete::<(), u32>()?;
-            let (_, value) = rpc.call()?;
-            counter.value = value;
-            println!("Counter ticked: {}", counter.value);
+        // Authority peer: replicate the change to the simulated peer.
+        if let Some(mut collector) = counter.replica.collect_changes() {
+            collector
+                .scope()
+                .collect_replicated(&counter.value)
+                .unwrap();
+        }
+
+        // Simulated peer: replicate changes from the authority peer.
+        if let Some(mut applicator) = counter.replica.apply_changes() {
+            applicator
+                .scope()
+                .apply_replicated(&mut counter.value)
+                .unwrap();
+
+            println!("Counter ticked: {}", *counter.value);
         }
 
         replica_set.maintain();
@@ -105,37 +111,39 @@ fn app(
     }
 }
 
+// Define the peer role with channels access mode based on whether it's an
+// authority or simulated peer.
+// Authority peers can only write replication, while simulated peers can only
+// read replication.
 enum CounterRole {
     Authority {
-        rpcs: Sender<Dispatch<ReplicationBuffer>>,
+        changes: Sender<Dispatch<ReplicationBuffer>>,
     },
     Simulated {
-        rpcs: Receiver<Dispatch<ReplicationBuffer>>,
+        changes: Receiver<Dispatch<ReplicationBuffer>>,
     },
 }
 
-impl TypedPeer for CounterRole {
+impl TypedPeerRole for CounterRole {
     const ROLE_ID: PeerRoleId = PeerRoleId::new(0);
+}
 
-    fn builder(builder: PeerBuilder) -> PeerBuilder {
-        let is_server = builder
-            .user_data()
-            .access::<bool>()
-            .copied()
-            .unwrap_or_default();
+impl TypedPeer for CounterRole {
+    fn builder(builder: PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> {
+        let is_server = builder.user_data().access::<bool>().copied()?;
 
         if is_server {
-            builder.bind_write::<ReplicationBuffer, ReplicationBuffer>(
-                RPC_CHANNEL,
+            Ok(builder.bind_write::<ReplicationBuffer, ReplicationBuffer>(
+                CHANGE_CHANNEL,
                 ChannelMode::ReliableOrdered,
                 None,
-            )
+            ))
         } else {
-            builder.bind_read::<ReplicationBuffer, ReplicationBuffer>(
-                RPC_CHANNEL,
+            Ok(builder.bind_read::<ReplicationBuffer, ReplicationBuffer>(
+                CHANGE_CHANNEL,
                 ChannelMode::ReliableOrdered,
                 None,
-            )
+            ))
         }
     }
 
@@ -144,17 +152,19 @@ impl TypedPeer for CounterRole {
 
         if is_server {
             Ok(Self::Authority {
-                rpcs: peer.write::<ReplicationBuffer>(RPC_CHANNEL)?,
+                changes: peer.write::<ReplicationBuffer>(CHANGE_CHANNEL)?,
             })
         } else {
             Ok(Self::Simulated {
-                rpcs: peer.read::<ReplicationBuffer>(RPC_CHANNEL)?,
+                changes: peer.read::<ReplicationBuffer>(CHANGE_CHANNEL)?,
             })
         }
     }
 }
 
 struct Counter {
+    // The replica representing this counter.
     replica: Replica,
-    value: u32,
+    // The replicated counter value.
+    value: HashReplicated<u32>,
 }

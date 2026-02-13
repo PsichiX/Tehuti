@@ -1,10 +1,12 @@
-use examples::tcp::tcp_example;
+use samples::tcp::tcp_example;
 use std::{error::Error, net::SocketAddr, time::Duration};
 use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
     event::Duplex,
     meeting::{MeetingInterface, MeetingUserEvent},
-    peer::{PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
+    peer::{
+        PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer, TypedPeerRole,
+    },
 };
 use tehuti_mock::mock_recv_matching;
 
@@ -12,7 +14,7 @@ const ADDRESS: &str = "127.0.0.1:8888";
 const MESSAGE_CHANNEL: ChannelId = ChannelId::new(0);
 
 /// Simple example demonstrating a server and client exchanging messages
-/// over a TCP connection using Tehuti's meeting and peer abstractions.
+/// over a TCP connection using Tehuti's meeting and peer primitives.
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Are you hosting a server? (y/n): ");
     let mut input = String::new();
@@ -86,15 +88,17 @@ struct ChatRole {
     events: Duplex<Dispatch<String>>,
 }
 
-impl TypedPeer for ChatRole {
+impl TypedPeerRole for ChatRole {
     const ROLE_ID: PeerRoleId = PeerRoleId::new(0);
+}
 
-    fn builder(builder: PeerBuilder) -> PeerBuilder {
-        builder.bind_read_write::<String, String>(
+impl TypedPeer for ChatRole {
+    fn builder(builder: PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> {
+        Ok(builder.bind_read_write::<String, String>(
             MESSAGE_CHANNEL,
             ChannelMode::ReliableOrdered,
             None,
-        )
+        ))
     }
 
     fn into_typed(mut peer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {

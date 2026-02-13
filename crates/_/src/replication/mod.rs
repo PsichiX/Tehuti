@@ -580,10 +580,7 @@ impl<T, C: Codec<Value = T>> DerefMut for CodecRep<T, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        codec::postcard::PostcardCodec,
-        replication::primitives::{RepF32, RepI32},
-    };
+    use crate::{codec::postcard::PostcardCodec, replication::primitives::RepF32};
     use serde::{Deserialize, Serialize};
     use std::{error::Error, io::Cursor};
 
@@ -618,7 +615,7 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Hash)]
     struct Zee {
-        a: HashReplicated<RepI32>,
+        a: HashReplicated<i32>,
         b: HashReplicated<RepF32>,
     }
 
@@ -641,7 +638,7 @@ mod tests {
         let mut data = HashReplicated::new(Foo { a: 42, b: false });
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 5);
+        assert_eq!(buffer.get_ref().len(), 2);
 
         let mut buffer = Cursor::default();
         assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
@@ -652,7 +649,7 @@ mod tests {
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 5);
+        assert_eq!(buffer.get_ref().len(), 2);
 
         let mut data2 = HashReplicated::new(Foo { a: 42, b: false });
         let buffer = buffer.into_inner();
@@ -667,7 +664,7 @@ mod tests {
         let mut data = MutReplicated::new(Foo { a: 42, b: false });
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 5);
+        assert_eq!(buffer.get_ref().len(), 2);
 
         let mut buffer = Cursor::default();
         assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
@@ -677,7 +674,7 @@ mod tests {
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 5);
+        assert_eq!(buffer.get_ref().len(), 2);
 
         let mut data2 = MutReplicated::new(Foo { a: 42, b: false });
         let buffer = buffer.into_inner();
@@ -692,7 +689,7 @@ mod tests {
         let mut data = ManReplicated::new(Foo { a: 42, b: false });
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 5);
+        assert_eq!(buffer.get_ref().len(), 2);
 
         let mut buffer = Cursor::default();
         assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
@@ -707,7 +704,7 @@ mod tests {
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 5);
+        assert_eq!(buffer.get_ref().len(), 2);
 
         let mut data2 = ManReplicated::new(Foo { a: 42, b: false });
         let buffer = buffer.into_inner();
@@ -784,19 +781,19 @@ mod tests {
     #[test]
     fn test_partial_replication() {
         let mut data = HashReplicated::new(Zee {
-            a: HashReplicated::new(RepI32(10)),
+            a: HashReplicated::new(10),
             b: HashReplicated::new(RepF32(4.2)),
         });
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 9);
+        assert_eq!(buffer.get_ref().len(), 10);
 
         let mut buffer = Cursor::default();
         assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
         assert_eq!(buffer.get_ref().len(), 0);
 
-        **data.a = 20;
+        *data.a = 20;
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
@@ -806,6 +803,6 @@ mod tests {
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 6);
+        assert_eq!(buffer.get_ref().len(), 3);
     }
 }

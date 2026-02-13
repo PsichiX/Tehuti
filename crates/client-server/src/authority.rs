@@ -5,7 +5,10 @@ use tehuti::{
     codec::postcard::PostcardCodec,
     event::{Duplex, Sender},
     meeting::{MeetingInterface, MeetingUserEvent},
-    peer::{Peer, PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer},
+    peer::{
+        Peer, PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer,
+        TypedPeerRole,
+    },
     replica::ReplicaId,
     third_party::typid::ID,
 };
@@ -39,14 +42,16 @@ pub struct AuthorityUserData {
     pub is_server: bool,
 }
 
-pub struct Authority {
+pub type PureAuthority = Authority<()>;
+
+pub struct Authority<Extension: TypedPeer> {
     meeting: MeetingInterface,
-    role: Option<Role>,
+    role: Option<Role<Extension>>,
     added_peers: Sender<Peer>,
     removed_peers: Sender<PeerId>,
 }
 
-impl Drop for Authority {
+impl<Extension: TypedPeer> Drop for Authority<Extension> {
     fn drop(&mut self) {
         if self.role.take().is_some() {
             let _ = self
@@ -57,13 +62,15 @@ impl Drop for Authority {
     }
 }
 
-impl Authority {
+impl<Extension: TypedPeer + 'static> Authority<Extension> {
     pub fn peer_factory(is_server: bool) -> Result<PeerFactory, Box<dyn Error>> {
         Ok(PeerFactory::default()
             .with_user_data(AuthorityUserData { is_server })?
-            .with_typed::<Role>())
+            .with_typed::<Role<Extension>>())
     }
+}
 
+impl<Extension: TypedPeer> Authority<Extension> {
     pub fn new(
         is_server: bool,
         meeting: MeetingInterface,
@@ -93,6 +100,22 @@ impl Authority {
 
     pub fn is_client(&self) -> bool {
         matches!(self.role, Some(Role::Client { .. }))
+    }
+
+    pub fn extension(&self) -> Option<&Extension> {
+        match &self.role {
+            Some(Role::Server { extension, .. }) => Some(extension),
+            Some(Role::Client { extension, .. }) => Some(extension),
+            None => None,
+        }
+    }
+
+    pub fn extension_mut(&mut self) -> Option<&mut Extension> {
+        match &mut self.role {
+            Some(Role::Server { extension, .. }) => Some(extension),
+            Some(Role::Client { extension, .. }) => Some(extension),
+            None => None,
+        }
     }
 
     pub fn create_peer(&mut self, role_id: PeerRoleId) -> Result<(), Box<dyn Error>> {
@@ -173,7 +196,7 @@ impl Authority {
             match event {
                 MeetingUserEvent::PeerAdded(peer) => {
                     if peer.info().peer_id == AUTHORITY_PEER {
-                        let role = peer.into_typed::<Role>()?;
+                        let role = peer.into_typed::<Role<Extension>>()?;
                         self.role = Some(role);
                     } else {
                         self.added_peers.send(peer)?;
@@ -195,6 +218,7 @@ impl Authority {
                 events,
                 peer_id_generator,
                 replica_id_generator,
+                ..
             }) => {
                 for event in events.receiver.iter() {
                     if let AuthorityEvent::Request(event_id, request) = event.message {
@@ -236,6 +260,7 @@ impl Authority {
             Some(Role::Client {
                 events,
                 replica_id_requests,
+                ..
             }) => {
                 for _ in replica_id_requests.extract_if(|_, receiver| receiver.is_disconnected()) {}
                 for event in events.receiver.iter() {
@@ -265,31 +290,37 @@ impl Authority {
     }
 }
 
-enum Role {
+// TODO: allow user to define additional events for their use?
+enum Role<Extension: TypedPeer> {
     Server {
         events: Duplex<Dispatch<AuthorityEvent>>,
         peer_id_generator: u64,
         replica_id_generator: u64,
+        extension: Extension,
     },
     Client {
         events: Duplex<Dispatch<AuthorityEvent>>,
         replica_id_requests: HashMap<EventId, Sender<ReplicaId>>,
+        extension: Extension,
     },
 }
 
-impl TypedPeer for Role {
+impl<Extension: TypedPeer> TypedPeerRole for Role<Extension> {
     const ROLE_ID: PeerRoleId = AUTHORITY_ROLE;
+}
 
-    fn builder(builder: PeerBuilder) -> PeerBuilder {
+impl<Extension: TypedPeer> TypedPeer for Role<Extension> {
+    fn builder(builder: PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> {
         if builder.info().peer_id != AUTHORITY_PEER {
-            return builder;
+            return Ok(builder);
         }
 
-        builder.bind_read_write::<PostcardCodec<AuthorityEvent>, AuthorityEvent>(
+        let builder = builder.bind_read_write::<PostcardCodec<AuthorityEvent>, AuthorityEvent>(
             AUTHORITY_EVENT_CHANNEL,
             ChannelMode::ReliableOrdered,
             None,
-        )
+        );
+        Extension::builder(builder)
     }
 
     fn into_typed(mut peer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
@@ -304,11 +335,13 @@ impl TypedPeer for Role {
                 events,
                 peer_id_generator: 0,
                 replica_id_generator: 0,
+                extension: Extension::into_typed(peer)?,
             })
         } else {
             Ok(Self::Client {
                 events,
                 replica_id_requests: Default::default(),
+                extension: Extension::into_typed(peer)?,
             })
         }
     }

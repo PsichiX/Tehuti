@@ -86,6 +86,86 @@ impl Codec for ReplicationBuffer {
     }
 }
 
+#[derive(Default)]
+pub struct RawReplicationBuffer {
+    buffer: Cursor<Vec<u8>>,
+}
+
+impl RawReplicationBuffer {
+    pub fn new(buffer: Vec<u8>) -> Self {
+        Self {
+            buffer: Cursor::new(buffer),
+        }
+    }
+
+    pub fn into_inner(self) -> Vec<u8> {
+        self.buffer.into_inner()
+    }
+
+    pub fn size(&self) -> usize {
+        self.buffer.get_ref().len()
+    }
+
+    pub fn collect_changes_scope<'a>(&'a mut self) -> ReplicaCollectChangesScope<'a> {
+        ReplicaCollectChangesScope {
+            position: self.buffer.position() as usize,
+            buffer: &mut self.buffer,
+        }
+    }
+
+    pub fn apply_changes_scope<'a>(&'a mut self) -> ReplicaApplyChangesScope<'a> {
+        ReplicaApplyChangesScope {
+            position: self.buffer.position() as usize,
+            buffer: &mut self.buffer,
+        }
+    }
+
+    pub fn rpc_encode<Output, Input>(
+        &mut self,
+        rpc: Rpc<Output, Input>,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        Output: Codec + Sized,
+        Input: Codec + Sized,
+    {
+        let mut buffer: Vec<u8> = Vec::new();
+        rpc.encode(&mut buffer)?;
+        self.buffer
+            .write_all(&(buffer.len() as u32).to_le_bytes())?;
+        self.buffer.write_all(&buffer)?;
+        Ok(())
+    }
+
+    pub fn rpc_decode(&mut self) -> Result<RpcPartialDecoder, Box<dyn Error>> {
+        let mut len_buff = [0u8; std::mem::size_of::<u32>()];
+        self.buffer.read_exact(&mut len_buff)?;
+        let mut buffer = vec![0u8; u32::from_le_bytes(len_buff) as usize];
+        self.buffer.read_exact(&mut buffer)?;
+        RpcPartialDecoder::new(buffer)
+    }
+}
+
+impl Codec for RawReplicationBuffer {
+    type Value = Self;
+
+    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+        buffer.write_all(&(message.buffer.get_ref().len() as u64).to_le_bytes())?;
+        buffer.write_all(message.buffer.get_ref())?;
+        Ok(())
+    }
+
+    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+        let mut len_bytes = [0u8; std::mem::size_of::<u64>()];
+        buffer.read_exact(&mut len_bytes)?;
+        let len = u64::from_le_bytes(len_bytes) as usize;
+        let mut data = vec![0u8; len];
+        buffer.read_exact(&mut data)?;
+        Ok(Self {
+            buffer: Cursor::new(data),
+        })
+    }
+}
+
 struct ReplicaInstance {
     change_sender: Option<Sender<ProtocolPacketData>>,
     change_receiver: Option<Receiver<ProtocolPacketData>>,
@@ -367,14 +447,14 @@ pub struct ReplicaCollectChanges {
 
 impl Drop for ReplicaCollectChanges {
     fn drop(&mut self) {
-        if let Some(buffer) = self.buffer.take() {
+        if let Some(buffer) = self.buffer.take()
+            && buffer.position() != 0
+        {
             let buffer = buffer.into_inner();
-            if !buffer.is_empty() {
-                let _ = self.sender.send(ProtocolPacketData {
-                    data: buffer,
-                    recepients: self.recepients.clone(),
-                });
-            }
+            let _ = self.sender.send(ProtocolPacketData {
+                data: buffer,
+                recepients: self.recepients.clone(),
+            });
         }
     }
 }
@@ -405,17 +485,29 @@ impl ReplicaCollectChanges {
         self
     }
 
+    pub fn scope<'a>(&'a mut self) -> ReplicaCollectChangesScope<'a> {
+        ReplicaCollectChangesScope {
+            position: self.buffer.as_ref().unwrap().position() as usize,
+            buffer: self.buffer.as_mut().unwrap(),
+        }
+    }
+}
+
+pub struct ReplicaCollectChangesScope<'a> {
+    position: usize,
+    buffer: &'a mut Cursor<Vec<u8>>,
+}
+
+impl<'a> ReplicaCollectChangesScope<'a> {
     pub fn collect_replicated<P, T>(
         &mut self,
-        replicated: &mut Replicated<P, T>,
+        replicated: &Replicated<P, T>,
     ) -> Result<(), Box<dyn Error>>
     where
         P: ReplicationPolicy<T>,
         T: Replicable,
     {
-        if let Some(buffer) = &mut self.buffer {
-            Replicated::collect_changes(replicated, buffer)?;
-        }
+        Replicated::collect_changes(replicated, self.buffer)?;
         Ok(())
     }
 
@@ -423,22 +515,31 @@ impl ReplicaCollectChanges {
     where
         T: Replicable,
     {
-        if let Some(buffer) = &mut self.buffer {
-            replicable.collect_changes(buffer)?;
-        }
+        replicable.collect_changes(self.buffer)?;
         Ok(())
+    }
+
+    pub fn abort(&mut self) {
+        self.buffer.set_position(self.position as u64);
+    }
+
+    pub fn scope<'b: 'a>(&'b mut self) -> ReplicaCollectChangesScope<'b> {
+        ReplicaCollectChangesScope {
+            position: self.buffer.position() as usize,
+            buffer: self.buffer,
+        }
     }
 }
 
 pub struct ReplicaApplyChanges {
-    buffer: Vec<u8>,
+    buffer: Cursor<Vec<u8>>,
 }
 
 impl ReplicaApplyChanges {
     pub fn new(replica: &Replica) -> Option<Self> {
         if let Some(receiver) = &replica.change_receiver {
             receiver.try_recv().map(|buffer| Self {
-                buffer: buffer.data,
+                buffer: Cursor::new(buffer.data),
             })
         } else {
             None
@@ -446,9 +547,23 @@ impl ReplicaApplyChanges {
     }
 
     pub fn size(&self) -> usize {
-        self.buffer.len()
+        self.buffer.get_ref().len()
     }
 
+    pub fn scope<'a>(&'a mut self) -> ReplicaApplyChangesScope<'a> {
+        ReplicaApplyChangesScope {
+            position: self.buffer.position() as usize,
+            buffer: &mut self.buffer,
+        }
+    }
+}
+
+pub struct ReplicaApplyChangesScope<'a> {
+    position: usize,
+    buffer: &'a mut Cursor<Vec<u8>>,
+}
+
+impl<'a> ReplicaApplyChangesScope<'a> {
     pub fn apply_replicated<P, T>(
         &mut self,
         replicated: &mut Replicated<P, T>,
@@ -457,21 +572,33 @@ impl ReplicaApplyChanges {
         P: ReplicationPolicy<T>,
         T: Replicable,
     {
-        let mut cursor = Cursor::new(self.buffer.as_slice());
+        let mut cursor = Cursor::new(self.buffer.get_ref().as_slice());
         Replicated::apply_changes(replicated, &mut cursor)?;
-        self.buffer.drain(0..cursor.position() as usize);
+        let position = cursor.position() as usize;
+        self.buffer.get_mut().drain(0..position);
         Ok(())
     }
 
-    pub fn apply_replicable<P, T>(&mut self, replicable: &mut T) -> Result<(), Box<dyn Error>>
+    pub fn apply_replicable<T>(&mut self, replicable: &mut T) -> Result<(), Box<dyn Error>>
     where
-        P: ReplicationPolicy<T>,
         T: Replicable,
     {
-        let mut cursor = Cursor::new(self.buffer.as_slice());
+        let mut cursor = Cursor::new(self.buffer.get_ref().as_slice());
         replicable.apply_changes(&mut cursor)?;
-        self.buffer.drain(0..cursor.position() as usize);
+        let position = cursor.position() as usize;
+        self.buffer.get_mut().drain(0..position);
         Ok(())
+    }
+
+    pub fn abort(&mut self) {
+        self.buffer.set_position(self.position as u64);
+    }
+
+    pub fn scope<'b: 'a>(&'b mut self) -> ReplicaApplyChangesScope<'b> {
+        ReplicaApplyChangesScope {
+            position: self.buffer.position() as usize,
+            buffer: self.buffer,
+        }
     }
 }
 
@@ -567,7 +694,8 @@ mod tests {
         replica
             .collect_changes()
             .unwrap()
-            .collect_replicated(&mut data)
+            .scope()
+            .collect_replicated(&data)
             .unwrap();
 
         // Pump the channels.
@@ -583,7 +711,7 @@ mod tests {
             .receiver
             .recv_blocking()
             .unwrap();
-        assert_eq!(packet.data.len(), 20);
+        assert_eq!(packet.data.len(), 17);
 
         descriptor
             .packet_senders
@@ -605,6 +733,7 @@ mod tests {
         replica
             .apply_changes()
             .unwrap()
+            .scope()
             .apply_replicated(&mut data)
             .unwrap();
         assert_eq!(*data, 42);
@@ -690,5 +819,29 @@ mod tests {
         // Execute the RPC.
         greet(&input);
         call.respond(()).result().unwrap();
+    }
+
+    #[test]
+    fn test_raw_replication_buffer() {
+        let mut buffer = RawReplicationBuffer::default();
+        buffer
+            .collect_changes_scope()
+            .collect_replicable(&42usize)
+            .unwrap();
+        buffer
+            .rpc_encode(Rpc::<(), String>::new("test", "Hello".to_owned()))
+            .unwrap();
+
+        let mut buffer = RawReplicationBuffer::new(buffer.into_inner());
+        let mut value = 0usize;
+        buffer
+            .apply_changes_scope()
+            .apply_replicable(&mut value)
+            .unwrap();
+        assert_eq!(value, 42);
+        let rpc = buffer.rpc_decode().unwrap();
+        assert_eq!(rpc.procedure(), "test");
+        let (_, input) = rpc.complete::<(), String>().unwrap().call().unwrap();
+        assert_eq!(input.as_str(), "Hello");
     }
 }

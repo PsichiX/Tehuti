@@ -192,7 +192,7 @@ impl Peer {
         PeerDestructurer::new(self)
     }
 
-    pub fn into_typed<T: TypedPeer>(self) -> Result<T, Box<dyn Error>> {
+    pub fn into_typed<T: TypedPeerRole>(self) -> Result<T, Box<dyn Error>> {
         T::into_typed(self.destructure())
     }
 
@@ -525,20 +525,28 @@ impl PeerBuilder {
     }
 }
 
-pub trait TypedPeer: Sized {
+pub trait TypedPeerRole: TypedPeer {
     const ROLE_ID: PeerRoleId;
+}
 
-    fn builder(builder: PeerBuilder) -> PeerBuilder {
-        builder
+pub trait TypedPeer: Sized {
+    fn builder(builder: PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> {
+        Ok(builder)
     }
 
     #[allow(unused_variables)]
     fn into_typed(peer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
         Err(format!(
-            "TypedPeer::into_typed not implemented for role id {}",
-            Self::ROLE_ID
+            "{}::into_typed() not implemented",
+            std::any::type_name::<Self>()
         )
         .into())
+    }
+}
+
+impl TypedPeer for () {
+    fn into_typed(_peer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
+        Ok(())
     }
 }
 
@@ -550,6 +558,10 @@ impl PeerDestructurer {
     pub fn new(mut peer: Peer) -> Self {
         peer.killer.destroy_on_drop = false;
         Self { peer }
+    }
+
+    pub fn into_peer(self) -> Peer {
+        self.peer
     }
 
     pub fn info(&self) -> &PeerInfo {
@@ -628,7 +640,11 @@ impl PeerDestructurer {
 
 #[derive(Default)]
 pub struct PeerFactory {
-    registry: BTreeMap<PeerRoleId, Arc<dyn Fn(PeerBuilder) -> PeerBuilder + Send + Sync>>,
+    #[allow(clippy::type_complexity)]
+    registry: BTreeMap<
+        PeerRoleId,
+        Arc<dyn Fn(PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> + Send + Sync>,
+    >,
     user_data: PeerUserData,
 }
 
@@ -649,13 +665,13 @@ impl PeerFactory {
     pub fn with(
         mut self,
         role_id: PeerRoleId,
-        builder_fn: impl Fn(PeerBuilder) -> PeerBuilder + Send + Sync + 'static,
+        builder_fn: impl Fn(PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> + Send + Sync + 'static,
     ) -> Self {
         self.register(role_id, builder_fn);
         self
     }
 
-    pub fn with_typed<T: TypedPeer + 'static>(mut self) -> Self {
+    pub fn with_typed<T: TypedPeerRole + 'static>(mut self) -> Self {
         self.register_typed::<T>();
         self
     }
@@ -663,7 +679,7 @@ impl PeerFactory {
     pub fn register(
         &mut self,
         role_id: PeerRoleId,
-        builder_fn: impl Fn(PeerBuilder) -> PeerBuilder + Send + Sync + 'static,
+        builder_fn: impl Fn(PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> + Send + Sync + 'static,
     ) {
         tracing::event!(
             target: "tehuti::peer",
@@ -673,7 +689,7 @@ impl PeerFactory {
         self.registry.insert(role_id, Arc::new(builder_fn));
     }
 
-    pub fn register_typed<T: TypedPeer + 'static>(&mut self) {
+    pub fn register_typed<T: TypedPeerRole + 'static>(&mut self) {
         self.register(T::ROLE_ID, T::builder);
     }
 
@@ -683,8 +699,7 @@ impl PeerFactory {
             .get(&peer.info.role_id)
             .ok_or_else(|| format!("No registered builder for role id {:?}", peer.info.role_id))?;
         let builder = PeerBuilder::new(peer.with_user_data(self.user_data.clone()));
-        let peer_builder = builder_fn(builder);
-        Ok(peer_builder.build())
+        Ok(builder_fn(builder)?.build())
     }
 }
 
@@ -705,7 +720,11 @@ mod tests {
     #[test]
     fn test_peer() {
         let factory = PeerFactory::default().with(PeerRoleId::new(0), |builder| {
-            builder.bind_read_write::<u8, u8>(ChannelId::new(0), ChannelMode::ReliableOrdered, None)
+            Ok(builder.bind_read_write::<u8, u8>(
+                ChannelId::new(0),
+                ChannelMode::ReliableOrdered,
+                None,
+            ))
         });
         let (meeting_tx, _) = unbounded();
 
