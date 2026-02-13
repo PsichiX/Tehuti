@@ -7,7 +7,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     error::Error,
     hash::{Hash, Hasher},
-    io::{Cursor, Read, Write},
+    io::{Cursor, ErrorKind, Read, Write},
     marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::Mutex,
@@ -208,10 +208,13 @@ where
         {
             let mut temp_buffer = Cursor::new(Vec::new());
             this.data.collect_changes(&mut temp_buffer)?;
-            let data_length = temp_buffer.get_ref().len() as u64;
+            if temp_buffer.get_ref().is_empty() {
+                return Ok(false);
+            }
             buffer.write_all(&[TAG])?;
+            let data_length = temp_buffer.get_ref().len() as u64;
             leb128::write::unsigned(buffer, data_length)?;
-            buffer.write_all(&temp_buffer.into_inner())?;
+            buffer.write_all(temp_buffer.get_ref())?;
             Ok(true)
         } else {
             Ok(false)
@@ -229,20 +232,28 @@ where
     ) -> Result<(), Box<dyn Error>> {
         let position = buffer.position();
         let mut tag_buf = [0u8; 1];
-        buffer.read_exact(&mut tag_buf)?;
+        match buffer.read_exact(&mut tag_buf) {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                buffer.set_position(position);
+                return Ok(());
+            }
+            Err(e) => return Err(Box::new(e)),
+        }
         if tag_buf[0] != TAG {
             buffer.set_position(position);
             return Ok(());
         }
         let data_length = leb128::read::unsigned(buffer)?;
+        let start_position = buffer.position();
         self.data.apply_changes(buffer)?;
-        let new_position = buffer.position();
-        if (new_position - position - 1) != data_length {
+        let end_position = buffer.position();
+        if (end_position - start_position) != data_length {
             buffer.set_position(position);
             return Err(format!(
                 "Data length mismatch: expected {}, got {}",
                 data_length,
-                new_position - position - 1
+                end_position - start_position
             )
             .into());
         }
@@ -613,7 +624,7 @@ mod tests {
         foo: HashPostcardReplicated<Foo>,
     }
 
-    #[derive(Debug, Clone, PartialEq, Hash)]
+    #[derive(Debug, Default, Clone, PartialEq, Hash)]
     struct Zee {
         a: HashReplicated<i32>,
         b: HashReplicated<RepF32>,
@@ -787,7 +798,14 @@ mod tests {
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 10);
+        assert_eq!(buffer.get_ref().len(), 9);
+
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut data2 = HashReplicated::new(Zee::default());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
+        assert_eq!(*data2.a, 10);
+        assert_eq!(data2.b.0, 4.2);
 
         let mut buffer = Cursor::default();
         assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
@@ -799,10 +817,24 @@ mod tests {
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
         assert_eq!(buffer.get_ref().len(), 3);
 
-        **data.b = 0.0;
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut data2 = HashReplicated::new(Zee::default());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
+        assert_eq!(*data2.a, 20);
+        assert_eq!(data2.b.0, 0.0);
+
+        **data.b = 5.7;
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());
-        assert_eq!(buffer.get_ref().len(), 3);
+        assert_eq!(buffer.get_ref().len(), 6);
+
+        let buffer = buffer.into_inner();
+        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut data2 = HashReplicated::new(Zee::default());
+        Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
+        assert_eq!(*data2.a, 0);
+        assert_eq!(data2.b.0, 5.7);
     }
 }

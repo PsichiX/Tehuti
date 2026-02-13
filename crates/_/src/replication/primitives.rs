@@ -50,42 +50,96 @@ macro_rules! impl_replicable_for_pod {
 }
 
 impl_replicable_for_pod!(
-    u8 => unsigned,
     u16 => unsigned,
     u32 => unsigned,
     u64 => unsigned,
-    u128 => unsigned,
     usize => unsigned,
-    i8 => signed,
     i16 => signed,
     i32 => signed,
     i64 => signed,
-    i128 => signed,
     isize => signed,
 );
 
-impl Replicable for f32 {
+impl Replicable for u8 {
     fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
-        self.to_bits().collect_changes(buffer)
+        buffer.write_all(&self.to_le_bytes())?;
+        Ok(())
     }
 
     fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
-        let mut bits = 0u32;
-        bits.apply_changes(buffer)?;
-        *self = f32::from_bits(bits);
+        let mut byte = [0u8; 1];
+        buffer.read_exact(&mut byte)?;
+        *self = u8::from_le_bytes(byte);
+        Ok(())
+    }
+}
+
+impl Replicable for i8 {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        buffer.write_all(&self.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        let mut byte = [0u8; 1];
+        buffer.read_exact(&mut byte)?;
+        *self = i8::from_le_bytes(byte);
+        Ok(())
+    }
+}
+
+impl Replicable for u128 {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        buffer.write_all(&self.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        let mut buf = [0u8; std::mem::size_of::<u128>()];
+        buffer.read_exact(&mut buf)?;
+        *self = u128::from_le_bytes(buf);
+        Ok(())
+    }
+}
+
+impl Replicable for i128 {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        buffer.write_all(&self.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        let mut buf = [0u8; std::mem::size_of::<i128>()];
+        buffer.read_exact(&mut buf)?;
+        *self = i128::from_le_bytes(buf);
+        Ok(())
+    }
+}
+
+impl Replicable for f32 {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        buffer.write_all(&self.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        let mut buf = [0u8; std::mem::size_of::<f32>()];
+        buffer.read_exact(&mut buf)?;
+        *self = f32::from_le_bytes(buf);
         Ok(())
     }
 }
 
 impl Replicable for f64 {
     fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
-        self.to_bits().collect_changes(buffer)
+        buffer.write_all(&self.to_le_bytes())?;
+        Ok(())
     }
 
     fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
-        let mut bits = 0u64;
-        bits.apply_changes(buffer)?;
-        *self = f64::from_bits(bits);
+        let mut buf = [0u8; std::mem::size_of::<f64>()];
+        buffer.read_exact(&mut buf)?;
+        *self = f64::from_le_bytes(buf);
         Ok(())
     }
 }
@@ -164,10 +218,10 @@ macro_rules! impl_rep_float {
                 }
             }
 
-            impl $crate::replication::Replicable for $wrap {
+            impl Replicable for $wrap {
                 fn collect_changes(
                     &self,
-                    buffer: &mut $crate::replication::BufferWrite,
+                    buffer: &mut BufferWrite,
                 ) -> Result<(), Box<dyn Error>> {
                     self.0.collect_changes(buffer)?;
                     Ok(())
@@ -175,7 +229,7 @@ macro_rules! impl_rep_float {
 
                 fn apply_changes(
                     &mut self,
-                    buffer: &mut $crate::replication::BufferRead,
+                    buffer: &mut BufferRead,
                 ) -> Result<(), Box<dyn Error>> {
                     self.0.apply_changes(buffer)?;
                     Ok(())

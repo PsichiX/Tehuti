@@ -9,7 +9,7 @@ use tehuti::{
     meeting::MeetingInterface,
     peer::{Peer, PeerBuilder, PeerId, PeerRoleId, TypedPeer, TypedPeerRole},
     replica::{Replica, ReplicaApplyChanges, ReplicaCollectChanges, ReplicaId, ReplicationBuffer},
-    replication::HashReplicated,
+    replication::{HashReplicated, primitives::RepF32},
 };
 use tehuti_client_server::{
     authority::PureAuthority,
@@ -25,6 +25,7 @@ const PLAYER_CHANGE_CHANNEL: ChannelId = ChannelId::new(1);
 const PLAYER_RPC_CHANNEL: ChannelId = ChannelId::new(2);
 const WORLD_SIZE: (i32, i32) = (20, 10);
 const DELTA_TIME: Duration = Duration::from_millis(1000 / 30);
+const SPEED: f32 = 5.0;
 
 /// Example showing replication of player state across machines in client-server
 /// network architecture.
@@ -68,7 +69,7 @@ fn app(
             break;
         }
 
-        game.handle_keys(&keys);
+        game.handle_inputs(&keys);
         game.draw(&mut terminal);
 
         std::thread::sleep(DELTA_TIME);
@@ -112,24 +113,24 @@ impl Game {
         })
     }
 
-    fn handle_keys(&mut self, keys: &Keys) {
+    fn handle_inputs(&mut self, keys: &Keys) {
         // Make local character move using arrow keys.
         // Its position will be replicated to its peer on other side.
         if let Some(character) = self.local_character_mut() {
-            if keys.get(KeyCode::Left).just_pressed() {
-                character.position.0 -= 1;
+            if keys.get(KeyCode::Left).is_down() {
+                character.position_x.0 -= SPEED * DELTA_TIME.as_secs_f32();
             }
-            if keys.get(KeyCode::Right).just_pressed() {
-                character.position.0 += 1;
+            if keys.get(KeyCode::Right).is_down() {
+                character.position_x.0 += SPEED * DELTA_TIME.as_secs_f32();
             }
-            if keys.get(KeyCode::Up).just_pressed() {
-                character.position.1 -= 1;
+            if keys.get(KeyCode::Up).is_down() {
+                character.position_y.0 -= SPEED * DELTA_TIME.as_secs_f32();
             }
-            if keys.get(KeyCode::Down).just_pressed() {
-                character.position.1 += 1;
+            if keys.get(KeyCode::Down).is_down() {
+                character.position_y.0 += SPEED * DELTA_TIME.as_secs_f32();
             }
-            character.position.0 = character.position.0.clamp(0, WORLD_SIZE.0 - 1);
-            character.position.1 = character.position.1.clamp(0, WORLD_SIZE.1 - 1);
+            character.position_x.0 = character.position_x.0.clamp(0.0, WORLD_SIZE.0 as f32 - 1.0);
+            character.position_y.0 = character.position_y.0.clamp(0.0, WORLD_SIZE.1 as f32 - 1.0);
         }
     }
 
@@ -152,9 +153,10 @@ impl Game {
 
         // Draw characters as their peer ID number.
         for (_, character) in self.characters() {
-            let (x, y) = *character.position;
+            let x = character.position_x.0;
+            let y = character.position_y.0;
 
-            if x >= 0 && y >= 0 && x < WORLD_SIZE.0 && y < WORLD_SIZE.1 {
+            if x >= 0.0 && y >= 0.0 && x < WORLD_SIZE.0 as f32 && y < WORLD_SIZE.1 as f32 {
                 terminal.display(
                     [x as u16 + 1, y as u16 + 1],
                     character.peer_id.id().to_string(),
@@ -277,11 +279,6 @@ impl Player {
         // Since our game assumes the only puppets controller can have is player
         // character, we can directly create puppet when we get any its replica.
         for replica in self.replica_added_receiver.iter() {
-            let position = (
-                random_range(2..WORLD_SIZE.0 - 2),
-                random_range(2..WORLD_SIZE.1 - 2),
-            );
-
             // Create a new character puppet for player's replica and send its
             // initial full snapshot.
             // Puppets are client-server representation of replicas, that help
@@ -290,7 +287,12 @@ impl Player {
                 replica,
                 Character {
                     peer_id: self.controller.info().peer_id,
-                    position: HashReplicated::new(position),
+                    position_x: HashReplicated::new(RepF32(
+                        random_range(2..WORLD_SIZE.0 - 2) as f32
+                    )),
+                    position_y: HashReplicated::new(RepF32(
+                        random_range(2..WORLD_SIZE.1 - 2) as f32
+                    )),
                 },
             ));
         }
@@ -369,7 +371,8 @@ struct Character {
     peer_id: PeerId,
     // Position is replicated across machines and automatically synchronized by
     // owning puppet.
-    position: HashReplicated<(i32, i32)>,
+    position_x: HashReplicated<RepF32>,
+    position_y: HashReplicated<RepF32>,
 }
 
 impl Puppetable for Character {
@@ -380,22 +383,26 @@ impl Puppetable for Character {
         full_snapshot: bool,
     ) -> Result<(), Box<dyn Error>> {
         if full_snapshot {
-            // If full snapshot is requested, we need to collect the whole state
-            // of the puppet, by collecting replicable state, which doesn't care
-            // about change tracking and just replicates full state.
-            collector.scope().collect_replicable(&*self.position)?;
-        } else {
-            // If full snapshot is not requested, we can just collect the changes
-            // since last replication, by collecting replicated state, which
-            // tracks changes using replication policy (hashed in our character).
-            collector.scope().collect_replicated(&self.position)?;
+            self.position_x.mark_changed();
+            self.position_y.mark_changed();
         }
+        collector
+            .scope()
+            .maybe_collect_replicated::<0, _, _>(&self.position_x)?;
+        collector
+            .scope()
+            .maybe_collect_replicated::<1, _, _>(&self.position_y)?;
         Ok(())
     }
 
     // Here we apply changes replicated from other machines.
     fn apply_changes(&mut self, mut applicator: ReplicaApplyChanges) -> Result<(), Box<dyn Error>> {
-        applicator.scope().apply_replicated(&mut self.position)?;
+        applicator
+            .scope()
+            .maybe_apply_replicated::<0, _, _>(&mut self.position_x)?;
+        applicator
+            .scope()
+            .maybe_apply_replicated::<1, _, _>(&mut self.position_y)?;
         Ok(())
     }
 }

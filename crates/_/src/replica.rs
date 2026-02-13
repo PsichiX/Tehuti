@@ -511,6 +511,18 @@ impl<'a> ReplicaCollectChangesScope<'a> {
         Ok(())
     }
 
+    pub fn maybe_collect_replicated<const TAG: u8, P, T>(
+        &mut self,
+        replicated: &Replicated<P, T>,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        P: ReplicationPolicy<T>,
+        T: Replicable,
+    {
+        Replicated::maybe_collect_changes::<TAG>(replicated, self.buffer)?;
+        Ok(())
+    }
+
     pub fn collect_replicable<T>(&mut self, replicable: &T) -> Result<(), Box<dyn Error>>
     where
         T: Replicable,
@@ -574,6 +586,21 @@ impl<'a> ReplicaApplyChangesScope<'a> {
     {
         let mut cursor = Cursor::new(self.buffer.get_ref().as_slice());
         Replicated::apply_changes(replicated, &mut cursor)?;
+        let position = cursor.position() as usize;
+        self.buffer.get_mut().drain(0..position);
+        Ok(())
+    }
+
+    pub fn maybe_apply_replicated<const TAG: u8, P, T>(
+        &mut self,
+        replicated: &mut Replicated<P, T>,
+    ) -> Result<(), Box<dyn Error>>
+    where
+        P: ReplicationPolicy<T>,
+        T: Replicable,
+    {
+        let mut cursor = Cursor::new(self.buffer.get_ref().as_slice());
+        Replicated::maybe_apply_changes::<TAG>(replicated, &mut cursor)?;
         let position = cursor.position() as usize;
         self.buffer.get_mut().drain(0..position);
         Ok(())

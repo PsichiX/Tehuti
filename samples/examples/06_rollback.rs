@@ -628,14 +628,13 @@ struct StateSnapshot {
 //   +--------+------+------+     +--------+------+------+
 //   | Peer   | Send | Recv |     | Peer   | Send | Recv |
 //   +--------+------+------+ <-> +--------+------+------+
-//   | Local  | X    | X    |     | Remote | X    | V    |
+//   | Local  | V    | X    |     | Remote | X    | V    |
 //   | Remote | X    | V    |     | Local  | V    | X    |
 //   +--------+------+------+     +--------+------+------+
 //   Behavior:
-//   - on server, only remote peer can receive inputs to apply to history buffer
-//     and resimulate game if divergence is detected.
-//   - on client, only local peer can send inputs to server for correction and
-//     remote peer can receive state snapshots from server for correction.
+//   - on server and client local peer can send inputs and remote peer can
+//     receive inputs to apply to history buffer and resimulate game if
+//     divergence is detected.
 // * State (authoritative snapshots / corrections):
 //   +----------------------+     +----------------------+
 //   | Server               |     | Client               |
