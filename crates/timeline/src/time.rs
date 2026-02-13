@@ -18,6 +18,19 @@ impl TimeStamp {
     pub const fn ticks(&self) -> u64 {
         self.0
     }
+
+    pub fn possibly_oldest(a: Option<Self>, b: Option<Self>) -> Option<Self> {
+        match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    pub fn find_possibly_oldest(timestamps: impl Iterator<Item = Option<Self>>) -> Option<Self> {
+        timestamps.flatten().min()
+    }
 }
 
 impl Add<u64> for TimeStamp {

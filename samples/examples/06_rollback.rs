@@ -51,11 +51,6 @@ const SPEED: f32 = 5.0;
 
 type TimelineAuthority = Authority<ClockExtension>;
 
-/// Example showing client-side prediction and server-side reconciliation of
-/// player state in a simple game where players can move around in a world.
-/// The server is authoritative and clients will predict their local player
-/// state based on their inputs while waiting for authoritative state updates
-/// from the server.
 fn main() -> Result<(), Box<dyn Error>> {
     // Setup diagnostics.
     let log_buffer = LogBuffer::new(50);
@@ -120,13 +115,10 @@ fn app(
         game.handle_inputs(&keys);
 
         if game.authority.is_server() {
-            // Server simulates single current frame as its clock is authoritative.
             game.simulate(delta_time.as_secs_f32());
         } else if game.authority.is_client()
             && let Clock::Simulation(clock) = &game.authority.extension().unwrap().clock
         {
-            // Client simulates multiple frames if needed to catch up with the
-            // estimated target tick that server is supposed to be at given time.
             let target = clock.estimate_target_tick(CLIENT_LEAD_TICKS);
 
             while game.authority.extension().unwrap().clock.tick() < target {
@@ -160,22 +152,16 @@ impl Game {
         let (added_peers_sender, added_peers_receiver) = unbounded();
         let (removed_peers_sender, removed_peers_receiver) = unbounded();
 
-        // Create communication authority that will handle client-server
-        // communication, and hold relativistic clock.
         let mut authority =
             TimelineAuthority::new(is_server, meeting, added_peers_sender, removed_peers_sender)?;
 
-        // Wait until authority is initialized for the sake of simpler code.
         while !authority.is_initialized() {
             authority.maintain()?;
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        // Create peer representing local player.
         authority.create_peer(PlayerRole::ROLE_ID)?;
 
-        // If it's client, immediately do first ping to server for initial clock
-        // synchronization.
         let extension = authority.extension_mut().unwrap();
         if let Clock::Simulation(clock) = &mut extension.clock {
             let event = clock.ping();
@@ -199,7 +185,6 @@ impl Game {
 
         let current_tick = self.authority.extension().unwrap().clock.tick();
 
-        // For every peer that showed up, create its player representation.
         for peer in self.added_peers_receiver.iter() {
             let mut player = peer.into_typed::<PlayerRole>()?;
 
@@ -223,15 +208,11 @@ impl Game {
         Ok(true)
     }
 
-    // After we enter new simulation frame, we should prepare this frame's
-    // history buffers for all players by extrapolating from previous tick.
     fn prepare_current_state(&mut self) -> Result<(), Box<dyn Error>> {
         let current_tick = self.authority.extension().unwrap().clock.tick();
 
         for player in self.players.values_mut() {
-            if let Some(inputs) = player.inputs_mut() {
-                inputs.extrapolate_to(current_tick);
-            }
+            player.inputs_mut().extrapolate_to(current_tick);
             player.state_mut().extrapolate_to(current_tick);
         }
 
@@ -239,17 +220,14 @@ impl Game {
     }
 
     fn maintain_server(&mut self, delta_time: f32) -> Result<(), Box<dyn Error>> {
-        // Collect inputs from remote players and check for divergence with their
-        // input history.
-        let divergence = self.server_find_input_divergence()?;
+        let divergence = self.find_input_divergence()?;
 
-        // If divergence happen, we must rollback and resimulate the game from
-        // the last known compatible state up to current tick.
         if let Some(divergence) = divergence {
             self.resimulate(divergence, delta_time)?;
         }
 
-        // Periodically send authoritative state updates to clients.
+        self.server_send_input()?;
+
         if self.timer.elapsed() >= SERVER_SEND_STATE_INTERVAL {
             self.timer = Instant::now();
             self.server_send_state()?;
@@ -257,8 +235,6 @@ impl Game {
 
         let extension = self.authority.extension().unwrap();
 
-        // Handle relativistic clock synchronization when server receives ping
-        // from client by responding with pong containing server's clock info.
         if let Clock::Authority(clock) = &extension.clock
             && let Some(Dispatch { message, .. }) = extension.events.receiver.last()
         {
@@ -269,26 +245,22 @@ impl Game {
         Ok(())
     }
 
-    fn server_find_input_divergence(&mut self) -> Result<Option<TimeStamp>, Box<dyn Error>> {
-        let mut divergence = None;
+    fn server_send_input(&self) -> Result<(), Box<dyn Error>> {
+        let current_tick = self.authority.extension().unwrap().clock.tick();
 
-        // Check for divergence in inputs received from remote players. If any
-        // received input history window diverged from local history, we need
-        // to resimulate the game from the last known compatible tick.
-        for player in self.players.values_mut() {
-            if let PlayerRole::ServerRemote {
-                input_receiver,
+        for player in self.players.values() {
+            if let PlayerRole::ServerLocal {
+                input_sender,
                 input_history,
                 ..
             } = player
-                && let Some(Dispatch { message, .. }) = input_receiver.last()
+                && let Some(event) = HistoryEvent::collect_snapshot(input_history, current_tick)
             {
-                let div = message.apply_history_divergence(input_history)?;
-                divergence = TimeStamp::possibly_oldest(divergence, div);
+                input_sender.send(event.into())?;
             }
         }
 
-        Ok(divergence)
+        Ok(())
     }
 
     fn server_send_state(&self) -> Result<(), Box<dyn Error>> {
@@ -320,11 +292,10 @@ impl Game {
     }
 
     fn maintain_client(&mut self, delta_time: f32) -> Result<(), Box<dyn Error>> {
-        // Collect authoritative state updates from server and check for
-        // divergence with client's predicted state. If any received state
-        // update diverged from client's predicted state, we need to resimulate
-        // the game from the last known compatible tick.
-        let divergence = self.client_find_state_divergence()?;
+        let divergence = TimeStamp::possibly_oldest(
+            self.find_input_divergence()?,
+            self.client_find_state_divergence()?,
+        );
 
         if let Some(divergence) = divergence {
             self.resimulate(divergence, delta_time)?;
@@ -333,15 +304,12 @@ impl Game {
         let extension = self.authority.extension_mut().unwrap();
 
         if let Clock::Simulation(clock) = &mut extension.clock {
-            // Handle relativistic clock synchronization by periodically pinging
-            // the server.
             if self.timer.elapsed() >= CLIENT_PING_INTERVAL {
                 let event = clock.ping();
                 extension.events.sender.send(event.into())?;
                 self.timer = Instant::now();
             }
 
-            // Update client's clock based on pong info received from server.
             for Dispatch { message, .. } in extension.events.receiver.iter() {
                 clock.roundtrip(message);
             }
@@ -355,9 +323,6 @@ impl Game {
 
         for player in self.players.values_mut() {
             match player {
-                // For local player, find the oldest authoritative state desync
-                // with client's predicted state, while applying received state
-                // updates to client's history.
                 PlayerRole::ClientLocal {
                     state_receiver,
                     state_history,
@@ -368,19 +333,45 @@ impl Game {
                         divergence = TimeStamp::possibly_oldest(divergence, div);
                     }
                 }
-                // For remote player, simply apply received state updates to
-                // client's history - there is no prediction for remote player
-                // on client so we don't need to check for divergence here.
                 PlayerRole::ClientRemote {
                     state_receiver,
-                    state_snapshot,
+                    state_history,
                     ..
                 } => {
                     if let Some(Dispatch { message, .. }) = state_receiver.last() {
-                        message.apply_history(state_snapshot)?;
+                        message.apply_history(state_history)?;
                     }
                 }
                 _ => {}
+            }
+        }
+
+        Ok(divergence)
+    }
+
+    fn find_input_divergence(&mut self) -> Result<Option<TimeStamp>, Box<dyn Error>> {
+        let mut divergence = None;
+
+        for player in self.players.values_mut() {
+            let (input_receiver, input_history) = match player {
+                PlayerRole::ServerRemote {
+                    input_receiver,
+                    input_history,
+                    ..
+                } => (input_receiver, input_history),
+                PlayerRole::ClientRemote {
+                    input_receiver,
+                    input_history,
+                    ..
+                } => (input_receiver, input_history),
+                _ => {
+                    continue;
+                }
+            };
+
+            if let Some(Dispatch { message, .. }) = input_receiver.last() {
+                let div = message.apply_history_divergence(input_history)?;
+                divergence = TimeStamp::possibly_oldest(divergence, div);
             }
         }
 
@@ -396,18 +387,11 @@ impl Game {
             .clock
             .set_tick(start_tick);
 
-        // Rewind all players' input and state history buffers to the last known
-        // compatible tick.
         for player in self.players.values_mut() {
-            if let Some(inputs) = player.inputs_mut() {
-                inputs.rewind_to(start_tick);
-            }
+            player.inputs_mut().rewind_to(start_tick);
             player.state_mut().rewind_to(start_tick);
         }
 
-        // Simulate the game forward from the last known compatible tick up to
-        // current tick. After resimulation, client's predicted state should be
-        // corrected and in sync with the authoritative state.
         if start_tick < end_tick {
             debug!("Resimulating from tick {} to tick {}", start_tick, end_tick);
 
@@ -424,16 +408,12 @@ impl Game {
     fn simulate(&mut self, delta_time: f32) {
         let current_tick = self.authority.extension().unwrap().clock.tick();
 
-        // Grab current tick inputs and state for given player and simulate its
-        // movement based on simple velocity and position integration.
-        // REMEMBER: simulation should work on history buffer as much as possible!
         for player in self.players.values_mut() {
-            let input = player.inputs().map(|history| {
-                history
-                    .get_extrapolated(current_tick)
-                    .copied()
-                    .unwrap_or_default()
-            });
+            let input = player
+                .inputs()
+                .get_extrapolated(current_tick)
+                .copied()
+                .unwrap_or_default();
 
             let states = player.state_mut();
 
@@ -442,18 +422,16 @@ impl Game {
                 .copied()
                 .unwrap_or_default();
 
-            if let Some(input) = input {
-                state.velocity_x.0 = match (input.left, input.right) {
-                    (true, false) => -SPEED,
-                    (false, true) => SPEED,
-                    _ => 0.0,
-                };
-                state.velocity_y.0 = match (input.up, input.down) {
-                    (true, false) => -SPEED,
-                    (false, true) => SPEED,
-                    _ => 0.0,
-                };
-            }
+            state.velocity_x.0 = match (input.left, input.right) {
+                (true, false) => -SPEED,
+                (false, true) => SPEED,
+                _ => 0.0,
+            };
+            state.velocity_y.0 = match (input.up, input.down) {
+                (true, false) => -SPEED,
+                (false, true) => SPEED,
+                _ => 0.0,
+            };
 
             state.position_x.0 += state.velocity_x.0 * delta_time;
             state.position_y.0 += state.velocity_y.0 * delta_time;
@@ -463,40 +441,41 @@ impl Game {
             states.set(current_tick, state);
         }
 
-        // Once simulation is done, advance the clock to move to next tick.
         self.authority.extension_mut().unwrap().clock.advance(1);
     }
 
     fn handle_inputs(&mut self, keys: &Keys) {
         let current_tick = self.authority.extension().unwrap().clock.tick();
 
-        // Grab inputs state for local player and apply to current tick history
-        // buffer. On client, also send inputs window to server for reconciliation.
         if let Some(player) = self.local_player_mut() {
+            let (input_history, input_sender) = match player {
+                PlayerRole::ServerLocal {
+                    input_history,
+                    input_sender,
+                    ..
+                } => (input_history, input_sender),
+                PlayerRole::ClientLocal {
+                    input_history,
+                    input_sender,
+                    ..
+                } => (input_history, input_sender),
+                _ => {
+                    return;
+                }
+            };
+
             let input = InputSnapshot {
                 left: keys.get(KeyCode::Left).is_down(),
                 right: keys.get(KeyCode::Right).is_down(),
                 up: keys.get(KeyCode::Up).is_down(),
                 down: keys.get(KeyCode::Down).is_down(),
             };
-            match player {
-                PlayerRole::ServerLocal { input_history, .. } => {
-                    input_history.set(current_tick, input);
-                }
-                PlayerRole::ClientLocal {
-                    input_sender,
-                    input_history,
-                    ..
-                } => {
-                    input_history.set(current_tick, input);
-                    let since = current_tick - CLIENT_SEND_INPUT_WINDOW;
-                    if let Some(event) =
-                        HistoryEvent::collect_history(input_history, since..=current_tick)
-                    {
-                        input_sender.send(event.into()).ok();
-                    }
-                }
-                _ => {}
+
+            input_history.set(current_tick, input);
+            let since = current_tick - CLIENT_SEND_INPUT_WINDOW;
+            if let Some(event) = HistoryEvent::collect_history(input_history, since..=current_tick)
+            {
+                input_sender.send(event.into()).ok();
             }
         }
     }
@@ -649,13 +628,14 @@ struct StateSnapshot {
 //   +--------+------+------+     +--------+------+------+
 //   | Peer   | Send | Recv |     | Peer   | Send | Recv |
 //   +--------+------+------+ <-> +--------+------+------+
-//   | Local  | X    | X    |     | Remote | X    | X    |
+//   | Local  | X    | X    |     | Remote | X    | V    |
 //   | Remote | X    | V    |     | Local  | V    | X    |
 //   +--------+------+------+     +--------+------+------+
 //   Behavior:
 //   - on server, only remote peer can receive inputs to apply to history buffer
 //     and resimulate game if divergence is detected.
-//   - on client, only local peer can send inputs to server for reconciliation.
+//   - on client, only local peer can send inputs to server for correction and
+//     remote peer can receive state snapshots from server for correction.
 // * State (authoritative snapshots / corrections):
 //   +----------------------+     +----------------------+
 //   | Server               |     | Client               |
@@ -670,13 +650,12 @@ struct StateSnapshot {
 //     to clients.
 //   - on client, both local and remote peers can receive authoritative snapshots
 //     from server.
-// * On server local and remote peers need input and state history for full
-//   rollback and resimulation capabilities.
-// * On client local peer needs input and state history for client-side prediction
-//   and remote peer needs state snapshot for correction and extrapolation.
+// * On server and client local and remote peers need input and state history
+//   for full rollback and resimulation capabilities.
 enum PlayerRole {
     ServerLocal {
         info: PeerInfo,
+        input_sender: Sender<Dispatch<HistoryEvent<InputSnapshot>>>,
         state_sender: Sender<Dispatch<HistoryEvent<StateSnapshot>>>,
         input_history: HistoryBuffer<InputSnapshot>,
         state_history: HistoryBuffer<StateSnapshot>,
@@ -697,8 +676,10 @@ enum PlayerRole {
     },
     ClientRemote {
         info: PeerInfo,
+        input_receiver: Receiver<Dispatch<HistoryEvent<InputSnapshot>>>,
         state_receiver: Receiver<Dispatch<HistoryEvent<StateSnapshot>>>,
-        state_snapshot: HistoryBuffer<StateSnapshot>,
+        input_history: HistoryBuffer<InputSnapshot>,
+        state_history: HistoryBuffer<StateSnapshot>,
     },
 }
 
@@ -712,21 +693,21 @@ impl PlayerRole {
         }
     }
 
-    fn inputs(&self) -> Option<&HistoryBuffer<InputSnapshot>> {
+    fn inputs(&self) -> &HistoryBuffer<InputSnapshot> {
         match self {
-            Self::ServerLocal { input_history, .. } => Some(input_history),
-            Self::ClientLocal { input_history, .. } => Some(input_history),
-            Self::ServerRemote { input_history, .. } => Some(input_history),
-            _ => None,
+            Self::ServerLocal { input_history, .. } => input_history,
+            Self::ClientLocal { input_history, .. } => input_history,
+            Self::ServerRemote { input_history, .. } => input_history,
+            Self::ClientRemote { input_history, .. } => input_history,
         }
     }
 
-    fn inputs_mut(&mut self) -> Option<&mut HistoryBuffer<InputSnapshot>> {
+    fn inputs_mut(&mut self) -> &mut HistoryBuffer<InputSnapshot> {
         match self {
-            Self::ServerLocal { input_history, .. } => Some(input_history),
-            Self::ClientLocal { input_history, .. } => Some(input_history),
-            Self::ServerRemote { input_history, .. } => Some(input_history),
-            _ => None,
+            Self::ServerLocal { input_history, .. } => input_history,
+            Self::ClientLocal { input_history, .. } => input_history,
+            Self::ServerRemote { input_history, .. } => input_history,
+            Self::ClientRemote { input_history, .. } => input_history,
         }
     }
 
@@ -735,7 +716,7 @@ impl PlayerRole {
             Self::ServerLocal { state_history, .. } => state_history,
             Self::ServerRemote { state_history, .. } => state_history,
             Self::ClientLocal { state_history, .. } => state_history,
-            Self::ClientRemote { state_snapshot, .. } => state_snapshot,
+            Self::ClientRemote { state_history, .. } => state_history,
         }
     }
 
@@ -744,7 +725,7 @@ impl PlayerRole {
             Self::ServerLocal { state_history, .. } => state_history,
             Self::ServerRemote { state_history, .. } => state_history,
             Self::ClientLocal { state_history, .. } => state_history,
-            Self::ClientRemote { state_snapshot, .. } => state_snapshot,
+            Self::ClientRemote { state_history, .. } => state_history,
         }
     }
 }
@@ -759,11 +740,17 @@ impl TypedPeer for PlayerRole {
         let is_local = !builder.info().remote;
 
         Ok(match (is_server, is_local) {
-            (true, true) => builder.bind_write::<PostcardCodec<StateEvent>, StateEvent>(
-                PLAYER_STATE_CHANNEL,
-                ChannelMode::Unreliable,
-                None,
-            ),
+            (true, true) => builder
+                .bind_write::<PostcardCodec<InputEvent>, InputEvent>(
+                    PLAYER_INPUT_CHANNEL,
+                    ChannelMode::Unreliable,
+                    None,
+                )
+                .bind_write::<PostcardCodec<StateEvent>, StateEvent>(
+                    PLAYER_STATE_CHANNEL,
+                    ChannelMode::Unreliable,
+                    None,
+                ),
             (true, false) => builder
                 .bind_read::<PostcardCodec<InputEvent>, InputEvent>(
                     PLAYER_INPUT_CHANNEL,
@@ -786,11 +773,17 @@ impl TypedPeer for PlayerRole {
                     ChannelMode::Unreliable,
                     None,
                 ),
-            (false, false) => builder.bind_read::<PostcardCodec<StateEvent>, StateEvent>(
-                PLAYER_STATE_CHANNEL,
-                ChannelMode::Unreliable,
-                None,
-            ),
+            (false, false) => builder
+                .bind_read::<PostcardCodec<InputEvent>, InputEvent>(
+                    PLAYER_INPUT_CHANNEL,
+                    ChannelMode::Unreliable,
+                    None,
+                )
+                .bind_read::<PostcardCodec<StateEvent>, StateEvent>(
+                    PLAYER_STATE_CHANNEL,
+                    ChannelMode::Unreliable,
+                    None,
+                ),
         })
     }
 
@@ -801,6 +794,7 @@ impl TypedPeer for PlayerRole {
         match (is_server, is_local) {
             (true, true) => Ok(Self::ServerLocal {
                 info: *peer.info(),
+                input_sender: peer.write::<InputEvent>(PLAYER_INPUT_CHANNEL)?,
                 state_sender: peer.write::<StateEvent>(PLAYER_STATE_CHANNEL)?,
                 input_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
                 state_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
@@ -822,7 +816,9 @@ impl TypedPeer for PlayerRole {
             (false, false) => Ok(Self::ClientRemote {
                 info: *peer.info(),
                 state_receiver: peer.read::<StateEvent>(PLAYER_STATE_CHANNEL)?,
-                state_snapshot: HistoryBuffer::with_capacity(1),
+                input_receiver: peer.read::<InputEvent>(PLAYER_INPUT_CHANNEL)?,
+                input_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
+                state_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
             }),
         }
     }
