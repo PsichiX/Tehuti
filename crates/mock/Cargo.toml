@@ -1,6 +1,6 @@
 [package]
 name = "tehuti-mock"
-version = "0.12.2"
+version = "0.13.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
 description = "Mock testing engine for Tehuti communication system."
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/tehuti-mock"
 readme = "../../README.md"
 
 [dependencies]
-tehuti = { version = "0.12", path = "../_" }
+tehuti = { version = "0.13", path = "../_" }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 rand = "0.10"
