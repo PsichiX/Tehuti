@@ -149,26 +149,43 @@ impl<T: Clone> HistoryBuffer<T> {
         }
     }
 
-    pub fn rewind_to(&mut self, timestamp: TimeStamp) {
-        if let Some(range) = self.range() {
+    pub fn time_travel_to(&mut self, timestamp: TimeStamp) -> bool {
+        let result = if let Some(range) = self.range() {
             if timestamp < *range.start() {
                 self.buffer.clear();
             } else if timestamp < *range.end() {
                 let len = timestamp - *range.start() + 1;
                 self.buffer.truncate(len);
+            } else if timestamp > *range.end() {
+                let duplicate_value = self.buffer.back().cloned().unwrap();
+                if timestamp - *range.end() >= self.capacity {
+                    self.buffer = std::iter::repeat_n(duplicate_value, self.capacity).collect();
+                } else {
+                    for _ in 0..(timestamp - *range.end()) {
+                        self.buffer.push_back(duplicate_value.clone());
+                        while self.len() > self.capacity {
+                            self.buffer.pop_front();
+                        }
+                    }
+                }
             }
-        }
+            true
+        } else {
+            false
+        };
         self.now = timestamp;
+        result
     }
 
-    pub fn extrapolate_to(&mut self, timestamp: TimeStamp)
-    where
-        T: Default,
-    {
-        // TODO: optimize!
-        while self.now < timestamp {
-            let value = self.get_extrapolated(self.now).cloned().unwrap_or_default();
-            self.set(self.now + 1, value);
+    pub fn ensure_timestamp(&mut self, timestamp: TimeStamp, default: impl Fn() -> T) {
+        let Some(range) = self.range() else {
+            self.set(timestamp, default());
+            return;
+        };
+        if timestamp < *range.start() {
+            self.set(timestamp, default());
+        } else if timestamp > *range.end() {
+            self.set(timestamp, self.buffer.back().cloned().unwrap());
         }
     }
 
@@ -327,6 +344,25 @@ pub struct HistoryEvent<T> {
 }
 
 impl<T> HistoryEvent<T> {
+    pub fn now(&self) -> TimeStamp {
+        self.start + self.snapshots.len() as u64 - 1
+    }
+
+    pub fn past(&self) -> TimeStamp {
+        self.start
+    }
+
+    pub fn range(&self) -> RangeInclusive<TimeStamp> {
+        self.past()..=self.now()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (TimeStamp, &T)> {
+        self.snapshots
+            .iter()
+            .enumerate()
+            .map(move |(index, snapshot)| (self.start + index as u64, snapshot))
+    }
+
     pub fn collect_history(
         buffer: &HistoryBuffer<T>,
         range: impl RangeBounds<TimeStamp> + Clone,
@@ -528,7 +564,7 @@ mod tests {
 
         buffer.set(TimeStamp::new(2), 2);
         buffer.set(TimeStamp::new(5), 5);
-        buffer.rewind_to(TimeStamp::new(4) - 1);
+        buffer.time_travel_to(TimeStamp::new(4) - 1);
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.now(), Some(TimeStamp::new(3)));
         assert_eq!(buffer.past(), Some(TimeStamp::new(3)));
@@ -650,7 +686,7 @@ mod tests {
         let divergence = a.divergence(&b).unwrap();
         assert_eq!(divergence, TimeStamp::new(2));
 
-        a.rewind_to(divergence - 1);
+        a.time_travel_to(divergence - 1);
         assert_eq!(a.len(), 2);
         assert_eq!(a.now(), Some(TimeStamp::new(1)));
         assert_eq!(a.past(), Some(TimeStamp::new(0)));

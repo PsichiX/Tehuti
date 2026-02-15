@@ -16,7 +16,7 @@ use tehuti_client_server::{
     controller::{Controller, ControllerEvent},
     puppet::{Puppet, Puppetable},
 };
-use tehuti_diagnostics::log_buffer::LogBuffer;
+use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
 use tracing_subscriber::{layer::SubscriberExt, registry, util::SubscriberInitExt};
 
 const ADDRESS: &str = "127.0.0.1:8888";
@@ -33,7 +33,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Setup diagnostics.
     let log_buffer = LogBuffer::new(50);
     Terminal::set_global_log_buffer(log_buffer.clone());
-    registry().with(log_buffer.into_layer("debug")).init();
+    registry()
+        .with(log_buffer.into_layer("debug"))
+        .with(Recorder::default().into_layer("trace"))
+        .init();
 
     println!("Are you hosting a server? (y/n): ");
     let mut input = String::new();

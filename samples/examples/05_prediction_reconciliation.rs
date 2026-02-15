@@ -21,7 +21,7 @@ use tehuti::{
     third_party::tracing::debug,
 };
 use tehuti_client_server::authority::{Authority, AuthorityUserData};
-use tehuti_diagnostics::log_buffer::LogBuffer;
+use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
 use tehuti_timeline::{
     clock::{Clock, ClockEvent},
     history::{HistoryBuffer, HistoryEvent},
@@ -39,8 +39,7 @@ const SERVER_SEND_STATE_INTERVAL: Duration = Duration::from_millis(1000 / 20);
 const CLIENT_SEND_INPUT_WINDOW: u64 = 4;
 const CLIENT_LEAD_TICKS: u64 = 2;
 const CLIENT_PING_INTERVAL: Duration = Duration::from_millis(250);
-const DELTA_TIME: [Duration; 6] = [
-    Duration::from_millis(1000 / 60),
+const DELTA_TIME: [Duration; 5] = [
     Duration::from_millis(1000 / 30),
     Duration::from_millis(1000 / 20),
     Duration::from_millis(1000 / 15),
@@ -60,7 +59,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Setup diagnostics.
     let log_buffer = LogBuffer::new(50);
     Terminal::set_global_log_buffer(log_buffer.clone());
-    registry().with(log_buffer.into_layer("debug")).init();
+    registry()
+        .with(log_buffer.into_layer("debug"))
+        .with(Recorder::default().into_layer("trace"))
+        .init();
 
     println!("Are you hosting a server? (y/n): ");
     let mut input = String::new();
@@ -109,7 +111,7 @@ fn app(
 
         let delta_time = DELTA_TIME[frame_rate_mode];
 
-        game.prepare_current_state()?;
+        game.prepare_current_tick()?;
 
         if game.authority.is_server() {
             game.maintain_server(delta_time.as_secs_f32())?;
@@ -225,14 +227,16 @@ impl Game {
 
     // After we enter new simulation frame, we should prepare this frame's
     // history buffers for all players by extrapolating from previous tick.
-    fn prepare_current_state(&mut self) -> Result<(), Box<dyn Error>> {
+    fn prepare_current_tick(&mut self) -> Result<(), Box<dyn Error>> {
         let current_tick = self.authority.extension().unwrap().clock.tick();
 
         for player in self.players.values_mut() {
             if let Some(inputs) = player.inputs_mut() {
-                inputs.extrapolate_to(current_tick);
+                inputs.ensure_timestamp(current_tick, Default::default);
             }
-            player.state_mut().extrapolate_to(current_tick);
+            player
+                .state_mut()
+                .ensure_timestamp(current_tick, Default::default);
         }
 
         Ok(())
@@ -400,9 +404,9 @@ impl Game {
         // compatible tick.
         for player in self.players.values_mut() {
             if let Some(inputs) = player.inputs_mut() {
-                inputs.rewind_to(start_tick);
+                inputs.time_travel_to(start_tick);
             }
-            player.state_mut().rewind_to(start_tick);
+            player.state_mut().time_travel_to(start_tick);
         }
 
         // Simulate the game forward from the last known compatible tick up to
@@ -469,16 +473,16 @@ impl Game {
 
     fn handle_inputs(&mut self, keys: &Keys) {
         let current_tick = self.authority.extension().unwrap().clock.tick();
+        let input = InputSnapshot {
+            left: keys.get(KeyCode::Left).is_down(),
+            right: keys.get(KeyCode::Right).is_down(),
+            up: keys.get(KeyCode::Up).is_down(),
+            down: keys.get(KeyCode::Down).is_down(),
+        };
 
         // Grab inputs state for local player and apply to current tick history
         // buffer. On client, also send inputs window to server for reconciliation.
         if let Some(player) = self.local_player_mut() {
-            let input = InputSnapshot {
-                left: keys.get(KeyCode::Left).is_down(),
-                right: keys.get(KeyCode::Right).is_down(),
-                up: keys.get(KeyCode::Up).is_down(),
-                down: keys.get(KeyCode::Down).is_down(),
-            };
             match player {
                 PlayerRole::ServerLocal { input_history, .. } => {
                     input_history.set(current_tick, input);

@@ -11,14 +11,21 @@ documentation = "https://docs.rs/tehuti"
 readme = "../../README.md"
 
 [features]
-default = ["postcard"]
+default = ["postcard", "decimal"]
 postcard = ["dep:postcard"]
+decimal = ["dep:rust_decimal"]
 
 [dependencies]
 flume = { version = "0.12", default-features = false, features = ["async"] }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"], optional = true }
+rust_decimal = { version = "1.40", features = [
+    "macros",
+    "maths",
+    "std",
+    "serde-float",
+], optional = true }
 typid = "1"
 seahash = "4"
 leb128 = "0.2"

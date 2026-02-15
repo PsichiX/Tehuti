@@ -41,6 +41,11 @@ pub mod replication;
 
 pub mod third_party {
     pub use leb128;
+    #[cfg(feature = "postcard")]
+    pub use postcard;
+    #[cfg(feature = "decimal")]
+    pub use rust_decimal;
+    pub use seahash;
     pub use tracing;
     pub use typid;
 }

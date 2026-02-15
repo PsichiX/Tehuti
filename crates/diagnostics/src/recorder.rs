@@ -1,15 +1,11 @@
 use chrono::Utc;
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 use tracing::Subscriber;
-use tracing_subscriber::{
-    Layer,
-    filter::Targets,
-    fmt::{MakeWriter, layer},
-    registry::LookupSpan,
-};
+use tracing_subscriber::{Layer, filter::Targets, fmt::layer, registry::LookupSpan};
 
 #[derive(Clone)]
 pub struct Recorder {
@@ -25,14 +21,26 @@ impl Default for Recorder {
 
 impl Recorder {
     pub fn new(directory: impl AsRef<Path>) -> Self {
+        let file_name = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "recording".to_owned());
         Self {
             directory: directory.as_ref().to_path_buf(),
-            file_name: "recording".to_owned(),
+            file_name,
         }
     }
 
     pub fn file_name(mut self, file_name: impl ToString) -> Self {
         self.file_name = file_name.to_string();
+        self
+    }
+
+    pub fn extend_file_name(mut self, extension: impl ToString) -> Self {
+        self.file_name = format!("{}-{}", self.file_name, extension.to_string());
         self
     }
 
@@ -47,33 +55,28 @@ impl Recorder {
                 Default::default()
             }
         };
-        layer()
-            .json()
-            .with_writer(self)
-            .with_target(true)
-            .with_filter(filter)
-    }
-}
 
-impl<'a> MakeWriter<'a> for Recorder {
-    type Writer = File;
-
-    fn make_writer(&'a self) -> Self::Writer {
         let mut file_path = self.directory.to_owned();
         file_path.push(format!(
             "{}.{}.log",
             self.file_name,
-            Utc::now().format("%Y%m%d%H%M%S")
+            Utc::now().format("%Y-%m-%d_%H-%M-%S")
         ));
-        OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
-            .truncate(true)
+            .append(true)
             .open(&file_path)
             .unwrap_or_else(|err| {
                 panic!(
                     "Could not open diagnostics log: {:?}. Error: {:?}",
                     file_path, err
                 )
-            })
+            });
+
+        layer()
+            .json()
+            .with_writer(Mutex::new(file))
+            .with_target(true)
+            .with_filter(filter)
     }
 }

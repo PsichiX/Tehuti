@@ -283,3 +283,18 @@ impl Replicable for RepChar {
         Ok(())
     }
 }
+
+#[cfg(feature = "decimal")]
+impl Replicable for rust_decimal::Decimal {
+    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        buffer.write_all(&self.serialize())?;
+        Ok(())
+    }
+
+    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        let mut buf = [0u8; 16];
+        buffer.read_exact(&mut buf)?;
+        *self = rust_decimal::Decimal::deserialize(buf);
+        Ok(())
+    }
+}

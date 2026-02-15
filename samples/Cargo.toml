@@ -16,5 +16,5 @@ serde = { version = "1", features = ["derive"] }
 crossterm = "0.29"
 textwrap = "0.16"
 vek = "0.17"
-rand = "0.9"
+rand = { version = "0.10", features = ["chacha"] }
 tracing-subscriber = "0.3"
