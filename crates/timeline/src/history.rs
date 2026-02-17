@@ -6,7 +6,7 @@ use std::{
     error::Error,
     ops::{Bound, RangeBounds, RangeInclusive},
 };
-use tehuti::replication::{BufferRead, BufferWrite, Replicable};
+use tehuti::{buffer::Buffer, replication::Replicable};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct HistoryBuffer<T: Clone> {
@@ -237,7 +237,7 @@ impl<T: Clone> HistoryBuffer<T> {
 
     pub fn collect_changes(
         &self,
-        buffer: &mut BufferWrite,
+        buffer: &mut Buffer,
         range: impl RangeBounds<TimeStamp> + Clone,
         compress_delta: bool,
     ) -> Result<(), Box<dyn Error>>
@@ -289,7 +289,7 @@ impl<T: Clone> HistoryBuffer<T> {
         Ok(())
     }
 
-    pub fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>>
+    pub fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>>
     where
         T: Default + Replicable,
     {
@@ -445,13 +445,13 @@ mod tests {
     }
 
     impl Replicable for Input {
-        fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
             self.run.collect_changes(buffer)?;
             self.jump.collect_changes(buffer)?;
             Ok(())
         }
 
-        fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
             self.run.apply_changes(buffer)?;
             self.jump.apply_changes(buffer)?;
             Ok(())
@@ -736,24 +736,24 @@ mod tests {
             },
         );
 
-        let mut buffer = BufferWrite::new(Default::default());
+        let mut buffer = Buffer::new(Default::default());
         a.collect_changes(&mut buffer, .., true).unwrap();
         let buffer = buffer.into_inner();
         assert_eq!(buffer.len(), 10);
 
         let mut b = HistoryBuffer::with_capacity(4);
-        let mut buffer = BufferRead::new(buffer.as_slice());
+        let mut buffer = Buffer::new(buffer);
         b.apply_changes(&mut buffer).unwrap();
 
         assert_eq!(a, b);
 
-        let mut buffer = BufferWrite::new(Default::default());
+        let mut buffer = Buffer::new(Default::default());
         a.collect_changes(&mut buffer, .., false).unwrap();
         let buffer = buffer.into_inner();
         assert_eq!(buffer.len(), 9);
 
         let mut b = HistoryBuffer::with_capacity(4);
-        let mut buffer = BufferRead::new(buffer.as_slice());
+        let mut buffer = Buffer::new(buffer);
         b.apply_changes(&mut buffer).unwrap();
 
         assert_eq!(a, b);

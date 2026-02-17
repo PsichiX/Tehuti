@@ -1,4 +1,5 @@
 use crate::{
+    buffer::Buffer,
     channel::{ChannelId, Dispatch},
     codec::Codec,
     engine::EngineId,
@@ -6,7 +7,7 @@ use crate::{
     peer::Peer,
     protocol::{PacketRecepients, ProtocolPacketData},
     replication::{
-        BufferRead, BufferWrite, Replicable, Replicated, ReplicationPolicy,
+        Replicable, Replicated, ReplicationPolicy,
         rpc::{Rpc, RpcPartialDecoder},
     },
 };
@@ -31,12 +32,12 @@ impl ReplicaId {
 }
 
 impl Replicable for ReplicaId {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.collect_changes(buffer)?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.apply_changes(buffer)?;
         Ok(())
     }
@@ -63,14 +64,14 @@ impl ReplicationBuffer {
 impl Codec for ReplicationBuffer {
     type Value = Self;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&message.replica_id.id().to_le_bytes())?;
         buffer.write_all(&(message.buffer.len() as u64).to_le_bytes())?;
         buffer.write_all(&message.buffer)?;
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut replica_id_bytes = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut replica_id_bytes)?;
         let replica_id = ReplicaId::new(u64::from_le_bytes(replica_id_bytes));
@@ -128,10 +129,11 @@ impl RawReplicationBuffer {
         Output: Codec + Sized,
         Input: Codec + Sized,
     {
-        let mut buffer: Vec<u8> = Vec::new();
+        let mut buffer = Cursor::new(Vec::new());
         rpc.encode(&mut buffer)?;
-        self.buffer
-            .write_all(&(buffer.len() as u32).to_le_bytes())?;
+        let size = buffer.get_ref().len() as u32;
+        self.buffer.write_all(&size.to_le_bytes())?;
+        let buffer = buffer.into_inner();
         self.buffer.write_all(&buffer)?;
         Ok(())
     }
@@ -139,7 +141,8 @@ impl RawReplicationBuffer {
     pub fn rpc_decode(&mut self) -> Result<RpcPartialDecoder, Box<dyn Error>> {
         let mut len_buff = [0u8; std::mem::size_of::<u32>()];
         self.buffer.read_exact(&mut len_buff)?;
-        let mut buffer = vec![0u8; u32::from_le_bytes(len_buff) as usize];
+        let size = u32::from_le_bytes(len_buff) as usize;
+        let mut buffer = vec![0u8; size];
         self.buffer.read_exact(&mut buffer)?;
         RpcPartialDecoder::new(buffer)
     }
@@ -148,13 +151,13 @@ impl RawReplicationBuffer {
 impl Codec for RawReplicationBuffer {
     type Value = Self;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.buffer.get_ref().len() as u64).to_le_bytes())?;
         buffer.write_all(message.buffer.get_ref())?;
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_bytes = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_bytes)?;
         let len = u64::from_le_bytes(len_bytes) as usize;
@@ -386,10 +389,10 @@ impl ReplicaRpcSender {
         Output: Codec + Sized,
         Input: Codec + Sized,
     {
-        let mut buffer: Vec<u8> = Vec::new();
+        let mut buffer = Cursor::new(Vec::new());
         rpc.encode(&mut buffer)?;
         self.sender.send(ProtocolPacketData {
-            data: buffer,
+            data: buffer.into_inner(),
             recepients: self.recepients.clone(),
         })?;
         Ok(())
@@ -584,10 +587,7 @@ impl<'a> ReplicaApplyChangesScope<'a> {
         P: ReplicationPolicy<T>,
         T: Replicable,
     {
-        let mut cursor = Cursor::new(self.buffer.get_ref().as_slice());
-        Replicated::apply_changes(replicated, &mut cursor)?;
-        let position = cursor.position() as usize;
-        self.buffer.get_mut().drain(0..position);
+        Replicated::apply_changes(replicated, self.buffer)?;
         Ok(())
     }
 
@@ -599,10 +599,7 @@ impl<'a> ReplicaApplyChangesScope<'a> {
         P: ReplicationPolicy<T>,
         T: Replicable,
     {
-        let mut cursor = Cursor::new(self.buffer.get_ref().as_slice());
-        Replicated::maybe_apply_changes::<TAG>(replicated, &mut cursor)?;
-        let position = cursor.position() as usize;
-        self.buffer.get_mut().drain(0..position);
+        Replicated::maybe_apply_changes::<TAG>(replicated, self.buffer)?;
         Ok(())
     }
 
@@ -610,10 +607,7 @@ impl<'a> ReplicaApplyChangesScope<'a> {
     where
         T: Replicable,
     {
-        let mut cursor = Cursor::new(self.buffer.get_ref().as_slice());
-        replicable.apply_changes(&mut cursor)?;
-        let position = cursor.position() as usize;
-        self.buffer.get_mut().drain(0..position);
+        replicable.apply_changes(self.buffer)?;
         Ok(())
     }
 
@@ -851,15 +845,19 @@ mod tests {
     #[test]
     fn test_raw_replication_buffer() {
         let mut buffer = RawReplicationBuffer::default();
+        assert_eq!(buffer.size(), 0);
         buffer
             .collect_changes_scope()
             .collect_replicable(&42usize)
             .unwrap();
+        assert_eq!(buffer.size(), 1);
         buffer
             .rpc_encode(Rpc::<(), String>::new("test", "Hello".to_owned()))
             .unwrap();
+        assert_eq!(buffer.size(), 49);
 
         let mut buffer = RawReplicationBuffer::new(buffer.into_inner());
+        assert_eq!(buffer.size(), 49);
         let mut value = 0usize;
         buffer
             .apply_changes_scope()

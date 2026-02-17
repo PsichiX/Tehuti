@@ -280,17 +280,17 @@ impl Game {
     }
 
     fn resimulate(&mut self, divergence: TimeStamp) -> Result<(), Box<dyn Error>> {
-        let start_tick = divergence;
         let end_tick = self.current_tick;
+        self.current_tick = divergence;
 
         for player in self.players.values_mut() {
-            player.input_history.time_travel_to(start_tick);
-            player.state_history.time_travel_to(start_tick);
-            player.state_hash_history.time_travel_to(start_tick);
+            player.input_history.time_travel_to(divergence);
+            player.state_history.time_travel_to(divergence);
+            player.state_hash_history.time_travel_to(divergence);
         }
 
-        if start_tick < end_tick {
-            debug!("Resimulating from tick {} to tick {}", start_tick, end_tick);
+        if self.current_tick < end_tick {
+            debug!("Resimulating from tick {} to tick {}", divergence, end_tick);
 
             while self.current_tick < end_tick {
                 self.simulate();

@@ -4,27 +4,24 @@ pub mod postcard;
 pub mod primitives;
 pub mod raw_bytes;
 
-use std::{
-    error::Error,
-    io::{Read, Write},
-    marker::PhantomData,
-};
+use crate::buffer::Buffer;
+use std::{error::Error, marker::PhantomData};
 
 pub trait Codec {
     type Value;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>>;
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>>;
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>>;
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>>;
 }
 
 impl<T> Codec for PhantomData<T> {
     type Value = PhantomData<T>;
 
-    fn encode(_: &Self::Value, _: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(_: &Self::Value, _: &mut Buffer) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    fn decode(_: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(_: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         Ok(PhantomData)
     }
 }
@@ -32,11 +29,11 @@ impl<T> Codec for PhantomData<T> {
 impl Codec for () {
     type Value = ();
 
-    fn encode(_: &Self::Value, _: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(_: &Self::Value, _: &mut Buffer) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    fn decode(_: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(_: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         Ok(())
     }
 }
@@ -50,7 +47,7 @@ macro_rules! impl_codec_tuple {
         {
             type Value = ( $($id::Value,)+ );
 
-            fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+            fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
                 let ( $($id,)+ ) = message;
                 $(
                     $id::encode(&$id, buffer)?;
@@ -58,7 +55,7 @@ macro_rules! impl_codec_tuple {
                 Ok(())
             }
 
-            fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+            fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
                 Ok((
                     $(
                         $id::decode(buffer)?,

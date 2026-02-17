@@ -1,9 +1,10 @@
 use crate::{
+    buffer::Buffer,
     channel::{ChannelId, ChannelMode},
     event::{Receiver, Sender},
     peer::PeerInfo,
     protocol::ProtocolPacketData,
-    replication::{BufferRead, BufferWrite, Replicable},
+    replication::Replicable,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, error::Error};
@@ -22,12 +23,12 @@ impl EngineId {
 }
 
 impl Replicable for EngineId {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.collect_changes(buffer)?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.apply_changes(buffer)?;
         Ok(())
     }

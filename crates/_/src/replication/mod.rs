@@ -2,7 +2,7 @@ pub mod containers;
 pub mod primitives;
 pub mod rpc;
 
-use crate::codec::Codec;
+use crate::{buffer::Buffer, codec::Codec};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     error::Error,
@@ -13,8 +13,6 @@ use std::{
     sync::Mutex,
 };
 
-pub type BufferWrite = Cursor<Vec<u8>>;
-pub type BufferRead<'a> = Cursor<&'a [u8]>;
 pub type FullReplicated<T> = Replicated<(), T>;
 pub type HashReplicated<T> = Replicated<HashRep, T>;
 pub type MutReplicated<T> = Replicated<MutRep, T>;
@@ -100,16 +98,16 @@ impl<T: Replicable> ReplicationPolicy<T> for ManRep {
 }
 
 pub trait Replicable: Sized {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>>;
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>>;
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>>;
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>>;
 }
 
 impl Replicable for () {
-    fn collect_changes(&self, _: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, _: &mut Buffer) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    fn apply_changes(&mut self, _: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, _: &mut Buffer) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 }
@@ -121,7 +119,7 @@ macro_rules! impl_replicable_tuple {
         where
             $( $id: Replicable ),+
         {
-            fn collect_changes(&self, buffer: &mut $crate::replication::BufferWrite) -> Result<(), Box<dyn Error>> {
+            fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
                 let ( $( $id, )+ ) = self;
                 $(
                     $id.collect_changes(buffer)?;
@@ -129,7 +127,7 @@ macro_rules! impl_replicable_tuple {
                 Ok(())
             }
 
-            fn apply_changes(&mut self, buffer: &mut $crate::replication::BufferRead) -> Result<(), Box<dyn Error>> {
+            fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
                 let ( $( $id, )+ ) = self;
                 $(
                     $id.apply_changes(buffer)?;
@@ -182,7 +180,7 @@ where
         self.data
     }
 
-    pub fn collect_changes(this: &Self, buffer: &mut BufferWrite) -> Result<bool, Box<dyn Error>> {
+    pub fn collect_changes(this: &Self, buffer: &mut Buffer) -> Result<bool, Box<dyn Error>> {
         if this
             .meta
             .lock()
@@ -198,7 +196,7 @@ where
 
     pub fn maybe_collect_changes<const TAG: u8>(
         this: &Self,
-        buffer: &mut BufferWrite,
+        buffer: &mut Buffer,
     ) -> Result<bool, Box<dyn Error>> {
         if this
             .meta
@@ -221,14 +219,14 @@ where
         }
     }
 
-    pub fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    pub fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.data.apply_changes(buffer)?;
         Ok(())
     }
 
     pub fn maybe_apply_changes<const TAG: u8>(
         &mut self,
-        buffer: &mut BufferRead,
+        buffer: &mut Buffer,
     ) -> Result<(), Box<dyn Error>> {
         let position = buffer.position();
         let mut tag_buf = [0u8; 1];
@@ -487,11 +485,11 @@ impl<'de, T: Deserialize<'de>, C: Codec<Value = T>> Deserialize<'de> for CodecRe
 }
 
 impl<T, C: Codec<Value = T>> Replicable for CodecRep<T, C> {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         C::encode(&self.data, buffer)
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.data = C::decode(buffer)?;
         Ok(())
     }
@@ -605,13 +603,13 @@ mod tests {
     }
 
     impl Replicable for Foo {
-        fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
             self.a.collect_changes(buffer)?;
             self.b.collect_changes(buffer)?;
             Ok(())
         }
 
-        fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
             self.a.apply_changes(buffer)?;
             self.b.apply_changes(buffer)?;
             Ok(())
@@ -631,13 +629,13 @@ mod tests {
     }
 
     impl Replicable for Zee {
-        fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+        fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
             Replicated::maybe_collect_changes::<0>(&self.a, buffer)?;
             Replicated::maybe_collect_changes::<1>(&self.b, buffer)?;
             Ok(())
         }
 
-        fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+        fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
             Replicated::maybe_apply_changes::<0>(&mut self.a, buffer)?;
             Replicated::maybe_apply_changes::<1>(&mut self.b, buffer)?;
             Ok(())
@@ -664,7 +662,7 @@ mod tests {
 
         let mut data2 = HashReplicated::new(Foo { a: 42, b: false });
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 100);
         assert!(data2.b);
@@ -689,7 +687,7 @@ mod tests {
 
         let mut data2 = MutReplicated::new(Foo { a: 42, b: false });
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 100);
         assert!(!data2.b);
@@ -719,7 +717,7 @@ mod tests {
 
         let mut data2 = ManReplicated::new(Foo { a: 42, b: false });
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 42);
         assert!(data2.b);
@@ -743,7 +741,7 @@ mod tests {
 
         let mut data2 = HashPostcardReplicated::<Foo>::new(Foo { a: 42, b: false }.into());
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 100);
         assert!(!data2.b);
@@ -782,7 +780,7 @@ mod tests {
             .into(),
         );
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(data2.a, 2.71);
         assert_eq!(data2.foo.a, 100);
@@ -801,7 +799,7 @@ mod tests {
         assert_eq!(buffer.get_ref().len(), 9);
 
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         let mut data2 = HashReplicated::new(Zee::default());
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(*data2.a, 10);
@@ -818,7 +816,7 @@ mod tests {
         assert_eq!(buffer.get_ref().len(), 3);
 
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         let mut data2 = HashReplicated::new(Zee::default());
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(*data2.a, 20);
@@ -831,7 +829,7 @@ mod tests {
         assert_eq!(buffer.get_ref().len(), 6);
 
         let buffer = buffer.into_inner();
-        let mut cursor = Cursor::new(buffer.as_slice());
+        let mut cursor = Cursor::new(buffer);
         let mut data2 = HashReplicated::new(Zee::default());
         Replicated::apply_changes(&mut data2, &mut cursor).unwrap();
         assert_eq!(*data2.a, 0);

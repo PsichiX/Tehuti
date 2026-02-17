@@ -1,4 +1,4 @@
-use crate::codec::Codec;
+use crate::{buffer::Buffer, codec::Codec};
 use std::{
     error::Error,
     io::{Read, Write},
@@ -9,13 +9,13 @@ pub struct RawBytesCodec;
 impl Codec for RawBytesCodec {
     type Value = Vec<u8>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         buffer.write_all(message)?;
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;

@@ -1,4 +1,4 @@
-use crate::codec::Codec;
+use crate::{buffer::Buffer, codec::Codec};
 use std::{
     collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet, LinkedList, VecDeque},
     error::Error,
@@ -15,14 +15,14 @@ where
 {
     type Value = [T::Value; N];
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         for item in message.iter() {
             T::encode(item, buffer)?;
         }
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut arr: [MaybeUninit<T::Value>; N] = unsafe { MaybeUninit::uninit().assume_init() };
         for elem in &mut arr {
             *elem = MaybeUninit::new(T::decode(buffer)?);
@@ -37,7 +37,7 @@ where
 {
     type Value = Option<T::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         match message {
             Some(value) => {
                 buffer.write_all(&[1u8])?;
@@ -50,7 +50,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut flag_buf = [0u8; 1];
         buffer.read_exact(&mut flag_buf)?;
         if flag_buf[0] == 1 {
@@ -68,7 +68,7 @@ where
 {
     type Value = Result<OK::Value, ERR::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         match message {
             Ok(value) => {
                 buffer.write_all(&[1u8])?;
@@ -82,7 +82,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut flag_buf = [0u8; 1];
         buffer.read_exact(&mut flag_buf)?;
         if flag_buf[0] == 1 {
@@ -99,11 +99,11 @@ where
 {
     type Value = Box<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         C::encode(message.as_ref(), buffer)
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         Ok(Box::new(C::decode(buffer)?))
     }
 }
@@ -114,11 +114,11 @@ where
 {
     type Value = Rc<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         C::encode(message.as_ref(), buffer)
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         Ok(Rc::new(C::decode(buffer)?))
     }
 }
@@ -129,11 +129,11 @@ where
 {
     type Value = Arc<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         C::encode(message.as_ref(), buffer)
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         Ok(Arc::new(C::decode(buffer)?))
     }
 }
@@ -144,7 +144,7 @@ where
 {
     type Value = Vec<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for item in message {
             C::encode(item, buffer)?;
@@ -152,7 +152,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
@@ -170,7 +170,7 @@ where
 {
     type Value = LinkedList<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for item in message {
             C::encode(item, buffer)?;
@@ -178,7 +178,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
@@ -196,7 +196,7 @@ where
 {
     type Value = VecDeque<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for item in message {
             C::encode(item, buffer)?;
@@ -204,7 +204,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
@@ -223,7 +223,7 @@ where
 {
     type Value = BinaryHeap<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for item in message {
             C::encode(item, buffer)?;
@@ -231,7 +231,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
@@ -251,7 +251,7 @@ where
 {
     type Value = HashMap<KC::Value, KV::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for (key, value) in message {
             KC::encode(key, buffer)?;
@@ -260,7 +260,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
@@ -281,7 +281,7 @@ where
 {
     type Value = HashSet<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for item in message {
             C::encode(item, buffer)?;
@@ -289,7 +289,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
@@ -309,7 +309,7 @@ where
 {
     type Value = BTreeMap<KC::Value, KV::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for (key, value) in message {
             KC::encode(key, buffer)?;
@@ -318,7 +318,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
@@ -339,7 +339,7 @@ where
 {
     type Value = BTreeSet<C::Value>;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&(message.len() as u64).to_le_bytes())?;
         for item in message {
             C::encode(item, buffer)?;
@@ -347,7 +347,7 @@ where
         Ok(())
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;

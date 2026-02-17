@@ -1,4 +1,4 @@
-use crate::codec::Codec;
+use crate::{buffer::Buffer, codec::Codec};
 use std::{
     error::Error,
     io::{Cursor, Read, Write},
@@ -207,7 +207,7 @@ impl<Output: Codec + Sized, Input: Codec + Sized> Rpc<Output, Input> {
         guid: &ID<()>,
         procedure: &str,
         input: &Input::Value,
-        buffer: &mut dyn Write,
+        buffer: &mut Buffer,
     ) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&[0u8])?;
         buffer.write_all(&type_hash.to_le_bytes())?;
@@ -225,7 +225,7 @@ impl<Output: Codec + Sized, Input: Codec + Sized> Rpc<Output, Input> {
         guid: &ID<()>,
         procedure: &str,
         output: &Output::Value,
-        buffer: &mut dyn Write,
+        buffer: &mut Buffer,
     ) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&[1u8])?;
         buffer.write_all(&type_hash.to_le_bytes())?;
@@ -240,7 +240,7 @@ impl<Output: Codec + Sized, Input: Codec + Sized> Rpc<Output, Input> {
 
     #[allow(clippy::type_complexity)]
     fn decoded_request(
-        buffer: &mut dyn Read,
+        buffer: &mut Buffer,
     ) -> Result<(u64, ID<()>, String, Input::Value), Box<dyn Error>> {
         let mut type_hash_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut type_hash_buf)?;
@@ -263,7 +263,7 @@ impl<Output: Codec + Sized, Input: Codec + Sized> Rpc<Output, Input> {
 
     #[allow(clippy::type_complexity)]
     fn decoded_response(
-        buffer: &mut dyn Read,
+        buffer: &mut Buffer,
     ) -> Result<(u64, ID<()>, String, Output::Value), Box<dyn Error>> {
         let mut type_hash_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut type_hash_buf)?;
@@ -313,11 +313,11 @@ impl<Output: Codec + Sized, Input: Codec + Sized> Rpc<Output, Input> {
         }
     }
 
-    pub fn encode(self, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    pub fn encode(self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         <Self as Codec>::encode(&self, buffer)
     }
 
-    pub fn decode(buffer: &mut dyn Read) -> Result<Self, Box<dyn Error>> {
+    pub fn decode(buffer: &mut Buffer) -> Result<Self, Box<dyn Error>> {
         <Self as Codec>::decode(buffer)
     }
 
@@ -366,7 +366,7 @@ where
 impl<Output: Codec + Sized, Input: Codec + Sized> Codec for Rpc<Output, Input> {
     type Value = Self;
 
-    fn encode(message: &Self::Value, buffer: &mut dyn Write) -> Result<(), Box<dyn Error>> {
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         match message {
             Self::Request(RpcRequest {
                 type_hash,
@@ -389,7 +389,7 @@ impl<Output: Codec + Sized, Input: Codec + Sized> Codec for Rpc<Output, Input> {
         }
     }
 
-    fn decode(buffer: &mut dyn Read) -> Result<Self::Value, Box<dyn Error>> {
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
         let mut kind_buf = [0u8; 1];
         buffer.read_exact(&mut kind_buf)?;
         match kind_buf[0] {
@@ -478,11 +478,13 @@ mod tests {
         let guid = rpc.guid();
         assert!(rpc.is_request());
 
-        let mut buffer: Vec<u8> = Vec::new();
+        let mut buffer = Cursor::new(Vec::new());
         rpc.encode(&mut buffer).unwrap();
+        let buffer = buffer.into_inner();
 
         ///// Machine B receive RPC, execute it and send response.
-        let rpc = RpcGreet::decode(&mut buffer.as_slice()).unwrap();
+        let mut buffer = Cursor::new(buffer);
+        let rpc = RpcGreet::decode(&mut buffer).unwrap();
         assert_eq!(rpc.guid(), guid);
         assert!(rpc.is_request());
 
@@ -495,11 +497,13 @@ mod tests {
         assert_eq!(rpc.guid(), guid);
         assert!(rpc.is_response());
 
-        let mut buffer: Vec<u8> = Vec::new();
+        let mut buffer = Cursor::new(Vec::new());
         rpc.encode(&mut buffer).unwrap();
+        let buffer = buffer.into_inner();
 
         ///// Machine A receive RPC response.
-        let rpc = RpcGreet::decode(&mut buffer.as_slice()).unwrap();
+        let mut buffer = Cursor::new(buffer);
+        let rpc = RpcGreet::decode(&mut buffer).unwrap();
         assert_eq!(rpc.guid(), guid);
         assert_eq!(rpc.procedure(), "greet");
         assert!(rpc.is_response());

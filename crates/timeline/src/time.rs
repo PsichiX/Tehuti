@@ -3,7 +3,7 @@ use std::{
     error::Error,
     ops::{Add, AddAssign, Sub, SubAssign},
 };
-use tehuti::replication::{BufferRead, BufferWrite, Replicable};
+use tehuti::{buffer::Buffer, codec::Codec, replication::Replicable};
 
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -70,14 +70,28 @@ impl Sub for TimeStamp {
 }
 
 impl Replicable for TimeStamp {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.collect_changes(buffer)?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.apply_changes(buffer)?;
         Ok(())
+    }
+}
+
+impl Codec for TimeStamp {
+    type Value = Self;
+
+    fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
+        u64::encode(&message.0, buffer)?;
+        Ok(())
+    }
+
+    fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
+        let ticks = u64::decode(buffer)?;
+        Ok(Self(ticks))
     }
 }
 

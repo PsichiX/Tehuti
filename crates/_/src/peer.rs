@@ -1,11 +1,12 @@
 use crate::{
+    buffer::Buffer,
     channel::{Channel, ChannelId, ChannelMode, Dispatch},
     codec::Codec,
     engine::{EnginePacketReceiver, EnginePacketSender, EnginePeerDescriptor},
     event::{Duplex, Receiver, Sender, bounded, unbounded},
     meeting::MeetingUserEvent,
     protocol::ProtocolPacketData,
-    replication::{BufferRead, BufferWrite, Replicable},
+    replication::Replicable,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,12 +32,12 @@ impl PeerId {
 }
 
 impl Replicable for PeerId {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.collect_changes(buffer)?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.apply_changes(buffer)?;
         Ok(())
     }
@@ -70,12 +71,12 @@ impl PeerRoleId {
 }
 
 impl Replicable for PeerRoleId {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.collect_changes(buffer)?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.apply_changes(buffer)?;
         Ok(())
     }
@@ -706,6 +707,7 @@ impl PeerFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_async() {
@@ -767,18 +769,19 @@ mod tests {
             .receiver
             .recv_blocking()
             .unwrap();
-        let message = u8::decode(&mut packet.data.as_slice()).unwrap();
+        let mut buffer = Cursor::new(packet.data);
+        let message = u8::decode(&mut buffer).unwrap();
         assert_eq!(message, 42u8);
 
-        let mut packet = Vec::new();
-        u8::encode(&100, &mut packet).unwrap();
+        let mut buffer = Cursor::new(Vec::new());
+        u8::encode(&100, &mut buffer).unwrap();
         descriptor
             .packet_senders
             .get(&ChannelId::new(0))
             .unwrap()
             .sender
             .send(ProtocolPacketData {
-                data: packet,
+                data: buffer.into_inner(),
                 recepients: Default::default(),
             })
             .unwrap();

@@ -29,6 +29,7 @@
 //!    other medium), received on the other side, converted back to messages,
 //!    and delivered to all machines peer(s).
 
+pub mod buffer;
 pub mod channel;
 pub mod codec;
 pub mod engine;

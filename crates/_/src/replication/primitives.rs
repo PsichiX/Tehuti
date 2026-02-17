@@ -1,4 +1,4 @@
-use crate::replication::{BufferRead, BufferWrite, Replicable};
+use crate::replication::{Buffer, Replicable};
 use serde::{Deserialize, Serialize};
 use std::{
     error::Error,
@@ -8,13 +8,13 @@ use std::{
 };
 
 impl Replicable for bool {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let byte = if *self { 1u8 } else { 0u8 };
         buffer.write_all(&[byte])?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut byte = [0u8; 1];
         buffer.read_exact(&mut byte)?;
         *self = byte[0] != 0;
@@ -31,17 +31,17 @@ macro_rules! impl_replicable_for_pod {
             impl Replicable for $t {
                 fn collect_changes(
                     &self,
-                    buffer: &mut $crate::replication::BufferWrite,
+                    buffer: &mut Buffer,
                 ) -> Result<(), Box<dyn Error>> {
-                    $crate::third_party::leb128::write::$mode(buffer, *self as _)?;
+                    leb128::write::$mode(buffer, *self as _)?;
                     Ok(())
                 }
 
                 fn apply_changes(
                     &mut self,
-                    buffer: &mut $crate::replication::BufferRead,
+                    buffer: &mut Buffer,
                 ) -> Result<(), Box<dyn Error>> {
-                    *self = $crate::third_party::leb128::read::$mode(buffer)? as _;
+                    *self = leb128::read::$mode(buffer)? as _;
                     Ok(())
                 }
             }
@@ -53,20 +53,22 @@ impl_replicable_for_pod!(
     u16 => unsigned,
     u32 => unsigned,
     u64 => unsigned,
+    u128 => unsigned,
     usize => unsigned,
     i16 => signed,
     i32 => signed,
     i64 => signed,
+    i128 => signed,
     isize => signed,
 );
 
 impl Replicable for u8 {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&self.to_le_bytes())?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut byte = [0u8; 1];
         buffer.read_exact(&mut byte)?;
         *self = u8::from_le_bytes(byte);
@@ -75,12 +77,12 @@ impl Replicable for u8 {
 }
 
 impl Replicable for i8 {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&self.to_le_bytes())?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut byte = [0u8; 1];
         buffer.read_exact(&mut byte)?;
         *self = i8::from_le_bytes(byte);
@@ -88,41 +90,13 @@ impl Replicable for i8 {
     }
 }
 
-impl Replicable for u128 {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
-        buffer.write_all(&self.to_le_bytes())?;
-        Ok(())
-    }
-
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
-        let mut buf = [0u8; std::mem::size_of::<u128>()];
-        buffer.read_exact(&mut buf)?;
-        *self = u128::from_le_bytes(buf);
-        Ok(())
-    }
-}
-
-impl Replicable for i128 {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
-        buffer.write_all(&self.to_le_bytes())?;
-        Ok(())
-    }
-
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
-        let mut buf = [0u8; std::mem::size_of::<i128>()];
-        buffer.read_exact(&mut buf)?;
-        *self = i128::from_le_bytes(buf);
-        Ok(())
-    }
-}
-
 impl Replicable for f32 {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&self.to_le_bytes())?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut buf = [0u8; std::mem::size_of::<f32>()];
         buffer.read_exact(&mut buf)?;
         *self = f32::from_le_bytes(buf);
@@ -131,12 +105,12 @@ impl Replicable for f32 {
 }
 
 impl Replicable for f64 {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&self.to_le_bytes())?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut buf = [0u8; std::mem::size_of::<f64>()];
         buffer.read_exact(&mut buf)?;
         *self = f64::from_le_bytes(buf);
@@ -145,13 +119,13 @@ impl Replicable for f64 {
 }
 
 impl Replicable for char {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let code = *self as u32;
         buffer.write_all(&code.to_le_bytes())?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut buf = [0u8; std::mem::size_of::<u32>()];
         buffer.read_exact(&mut buf)?;
         let code = u32::from_le_bytes(buf);
@@ -161,7 +135,7 @@ impl Replicable for char {
 }
 
 impl Replicable for String {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let bytes = self.as_bytes();
         let len = bytes.len() as u64;
         buffer.write_all(&len.to_le_bytes())?;
@@ -169,13 +143,13 @@ impl Replicable for String {
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut len_buf = [0u8; std::mem::size_of::<u64>()];
         buffer.read_exact(&mut len_buf)?;
         let len = u64::from_le_bytes(len_buf) as usize;
         let mut bytes = vec![0u8; len];
         buffer.read_exact(&mut bytes)?;
-        *self = String::from_utf8(bytes).map_err(|_| "Invalid UTF-8 string")?;
+        *self = String::from_utf8(bytes)?;
         Ok(())
     }
 }
@@ -221,7 +195,7 @@ macro_rules! impl_rep_float {
             impl Replicable for $wrap {
                 fn collect_changes(
                     &self,
-                    buffer: &mut BufferWrite,
+                    buffer: &mut Buffer,
                 ) -> Result<(), Box<dyn Error>> {
                     self.0.collect_changes(buffer)?;
                     Ok(())
@@ -229,7 +203,7 @@ macro_rules! impl_rep_float {
 
                 fn apply_changes(
                     &mut self,
-                    buffer: &mut BufferRead,
+                    buffer: &mut Buffer,
                 ) -> Result<(), Box<dyn Error>> {
                     self.0.apply_changes(buffer)?;
                     Ok(())
@@ -272,12 +246,12 @@ impl DerefMut for RepChar {
 }
 
 impl Replicable for RepChar {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         leb128::write::unsigned(buffer, self.0 as u64)?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0 =
             std::char::from_u32(leb128::read::unsigned(buffer)? as u32).ok_or("Invalid char")?;
         Ok(())
@@ -286,12 +260,12 @@ impl Replicable for RepChar {
 
 #[cfg(feature = "decimal")]
 impl Replicable for rust_decimal::Decimal {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         buffer.write_all(&self.serialize())?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         let mut buf = [0u8; 16];
         buffer.read_exact(&mut buf)?;
         *self = rust_decimal::Decimal::deserialize(buf);

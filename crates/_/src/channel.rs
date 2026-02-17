@@ -1,15 +1,17 @@
 use crate::{
+    buffer::Buffer,
     codec::Codec,
     engine::EngineId,
     event::{Receiver, Sender},
     protocol::{PacketRecepients, ProtocolPacketData},
-    replication::{BufferRead, BufferWrite, Replicable},
+    replication::Replicable,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
     error::Error,
     hash::Hash,
+    io::Cursor,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -37,12 +39,12 @@ impl ChannelId {
 }
 
 impl Replicable for ChannelId {
-    fn collect_changes(&self, buffer: &mut BufferWrite) -> Result<(), Box<dyn Error>> {
+    fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.collect_changes(buffer)?;
         Ok(())
     }
 
-    fn apply_changes(&mut self, buffer: &mut BufferRead) -> Result<(), Box<dyn Error>> {
+    fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
         self.0.apply_changes(buffer)?;
         Ok(())
     }
@@ -135,7 +137,8 @@ impl Channel {
                 .ok_or("Failed to downcast read channel state")?;
             if let Some(ProtocolPacketData { data, recepients }) = state.packet_receiver.try_recv()
             {
-                let message = C::decode(&mut data.as_slice())?;
+                let mut buffer = Cursor::new(data);
+                let message = C::decode(&mut buffer)?;
                 state
                     .message_sender
                     .send(Dispatch {
@@ -157,7 +160,8 @@ impl Channel {
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
             for ProtocolPacketData { data, recepients } in state.packet_receiver.iter() {
-                let message = C::decode(&mut data.as_slice())?;
+                let mut buffer = Cursor::new(data);
+                let message = C::decode(&mut buffer)?;
                 state
                     .message_sender
                     .send(Dispatch {
@@ -202,11 +206,14 @@ impl Channel {
                 recepients,
             }) = state.message_receiver.try_recv()
             {
-                let mut data = Vec::new();
-                C::encode(&message, &mut data)?;
+                let mut buffer = Cursor::new(Vec::new());
+                C::encode(&message, &mut buffer)?;
                 state
                     .packet_sender
-                    .send(ProtocolPacketData { data, recepients })
+                    .send(ProtocolPacketData {
+                        data: buffer.into_inner(),
+                        recepients,
+                    })
                     .map_err(|err| format!("Pump packet sender error: {err}"))?;
                 Ok(true)
             } else {
@@ -226,11 +233,14 @@ impl Channel {
                 recepients,
             } in state.message_receiver.iter()
             {
-                let mut data = Vec::new();
-                C::encode(&message, &mut data)?;
+                let mut buffer = Cursor::new(Vec::new());
+                C::encode(&message, &mut buffer)?;
                 state
                     .packet_sender
-                    .send(ProtocolPacketData { data, recepients })
+                    .send(ProtocolPacketData {
+                        data: buffer.into_inner(),
+                        recepients,
+                    })
                     .map_err(|err| format!("Pump-all packet sender error: {err}"))?;
                 count += 1;
             }
@@ -302,7 +312,8 @@ mod tests {
         channel.pump().unwrap();
 
         let packet = pkt_rx.recv_blocking().unwrap();
-        let message = PostcardCodec::<TestMessage>::decode(&mut packet.data.as_slice()).unwrap();
+        let mut buffer = Cursor::new(packet.data);
+        let message = PostcardCodec::<TestMessage>::decode(&mut buffer).unwrap();
         assert_eq!(message.id, 42);
     }
 
@@ -314,11 +325,11 @@ mod tests {
         let mut channel = Channel::read::<PostcardCodec<TestMessage>, _>(pkt_rx, msg_tx);
 
         let message = TestMessage { id: 42 };
-        let mut packet = Vec::new();
-        PostcardCodec::<TestMessage>::encode(&message, &mut packet).unwrap();
+        let mut buffer = Cursor::new(Vec::new());
+        PostcardCodec::<TestMessage>::encode(&message, &mut buffer).unwrap();
         pkt_tx
             .send(ProtocolPacketData {
-                data: packet,
+                data: buffer.into_inner(),
                 recepients: Default::default(),
             })
             .unwrap();
