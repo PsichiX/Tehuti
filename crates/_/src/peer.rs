@@ -707,6 +707,7 @@ impl PeerFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::replicable::RepCodec;
     use std::io::Cursor;
 
     #[test]
@@ -722,7 +723,7 @@ mod tests {
     #[test]
     fn test_peer() {
         let factory = PeerFactory::default().with(PeerRoleId::new(0), |builder| {
-            Ok(builder.bind_read_write::<u8, u8>(
+            Ok(builder.bind_read_write::<RepCodec<u8>, u8>(
                 ChannelId::new(0),
                 ChannelMode::ReliableOrdered,
                 None,
@@ -770,11 +771,11 @@ mod tests {
             .recv_blocking()
             .unwrap();
         let mut buffer = Cursor::new(packet.data);
-        let message = u8::decode(&mut buffer).unwrap();
+        let message = RepCodec::<u8>::decode(&mut buffer).unwrap();
         assert_eq!(message, 42u8);
 
         let mut buffer = Cursor::new(Vec::new());
-        u8::encode(&100, &mut buffer).unwrap();
+        RepCodec::<u8>::encode(&100, &mut buffer).unwrap();
         descriptor
             .packet_senders
             .get(&ChannelId::new(0))

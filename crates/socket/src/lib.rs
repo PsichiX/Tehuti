@@ -768,6 +768,7 @@ mod tests {
     use std::thread::spawn;
     use tehuti::{
         channel::{ChannelId, ChannelMode, Dispatch},
+        codec::replicable::RepCodec,
         meeting::MeetingUserEvent,
         peer::{PeerBuilder, PeerDestructurer, PeerRoleId, TypedPeer, TypedPeerRole},
     };
@@ -784,7 +785,7 @@ mod tests {
 
     impl TypedPeer for Chatter {
         fn builder(builder: PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> {
-            Ok(builder.bind_read_write::<String, String>(
+            Ok(builder.bind_read_write::<RepCodec<String>, String>(
                 ChannelId::new(0),
                 ChannelMode::ReliableOrdered,
                 None,

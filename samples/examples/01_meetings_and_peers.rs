@@ -2,6 +2,7 @@ use samples::tcp::tcp_example;
 use std::{error::Error, net::SocketAddr, time::Duration};
 use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
+    codec::replicable::RepCodec,
     event::Duplex,
     meeting::{MeetingInterface, MeetingUserEvent},
     peer::{
@@ -94,7 +95,7 @@ impl TypedPeerRole for ChatRole {
 
 impl TypedPeer for ChatRole {
     fn builder(builder: PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> {
-        Ok(builder.bind_read_write::<String, String>(
+        Ok(builder.bind_read_write::<RepCodec<String>, String>(
             MESSAGE_CHANNEL,
             ChannelMode::ReliableOrdered,
             None,

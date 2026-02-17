@@ -628,6 +628,7 @@ mod tests {
     use super::*;
     use crate::{
         channel::{ChannelId, ChannelMode},
+        codec::replicable::RepCodec,
         peer::{PeerBuildResult, PeerBuilder, PeerId, PeerInfo, PeerRoleId},
         replication::HashReplicated,
     };
@@ -795,7 +796,10 @@ mod tests {
         replica
             .rpc_sender()
             .unwrap()
-            .send(Rpc::<(), String>::new("greet", "Alice".to_owned()))
+            .send(Rpc::<(), RepCodec<String>>::new(
+                "greet",
+                "Alice".to_owned(),
+            ))
             .unwrap();
 
         // Pump the channels.
@@ -831,7 +835,7 @@ mod tests {
             .rpc_receive()
             .unwrap()
             .unwrap()
-            .complete::<(), String>()
+            .complete::<(), RepCodec<String>>()
             .unwrap();
         let (call, input) = rpc.call().unwrap();
         assert_eq!(call.procedure(), "greet");
@@ -852,7 +856,7 @@ mod tests {
             .unwrap();
         assert_eq!(buffer.size(), 1);
         buffer
-            .rpc_encode(Rpc::<(), String>::new("test", "Hello".to_owned()))
+            .rpc_encode(Rpc::<(), RepCodec<String>>::new("test", "Hello".to_owned()))
             .unwrap();
         assert_eq!(buffer.size(), 49);
 
@@ -866,7 +870,11 @@ mod tests {
         assert_eq!(value, 42);
         let rpc = buffer.rpc_decode().unwrap();
         assert_eq!(rpc.procedure(), "test");
-        let (_, input) = rpc.complete::<(), String>().unwrap().call().unwrap();
+        let (_, input) = rpc
+            .complete::<(), RepCodec<String>>()
+            .unwrap()
+            .call()
+            .unwrap();
         assert_eq!(input.as_str(), "Hello");
     }
 }

@@ -464,8 +464,9 @@ impl<Output: Codec + Sized, Input: Codec + Sized> Clone for RpcCall<Output, Inpu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::replicable::RepCodec;
 
-    type RpcGreet = Rpc<bool, String>;
+    type RpcGreet = Rpc<RepCodec<bool>, RepCodec<String>>;
 
     fn greet(name: &str) -> bool {
         name == "Alice"

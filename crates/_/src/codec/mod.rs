@@ -1,8 +1,7 @@
-pub mod containers;
 #[cfg(feature = "postcard")]
 pub mod postcard;
-pub mod primitives;
 pub mod raw_bytes;
+pub mod replicable;
 
 use crate::buffer::Buffer;
 use std::{error::Error, marker::PhantomData};

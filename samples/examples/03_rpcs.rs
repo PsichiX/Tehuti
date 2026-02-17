@@ -7,6 +7,7 @@ use std::{
 };
 use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
+    codec::replicable::RepCodec,
     event::{Receiver, Sender},
     meeting::{MeetingInterface, MeetingUserEvent},
     peer::{
@@ -20,7 +21,7 @@ use tehuti_mock::mock_recv_matching;
 const ADDRESS: &str = "127.0.0.1:8888";
 const RPC_CHANNEL: ChannelId = ChannelId::new(0);
 
-type TickRpc = Rpc<(), u32>;
+type TickRpc = Rpc<(), RepCodec<u32>>;
 
 /// Simple example demonstrating replication of a counter from an authority
 /// peer (server) to a simulated peer (client) over a TCP connection using
@@ -98,7 +99,7 @@ fn app(
         if let Some(Ok(decoder)) = counter.replica.rpc_receive()
             && decoder.procedure() == "tick"
         {
-            let rpc = decoder.complete::<(), u32>()?;
+            let rpc = decoder.complete::<(), RepCodec<u32>>()?;
             let (_, value) = rpc.call()?;
             counter.value = value;
             println!("Counter ticked: {}", counter.value);

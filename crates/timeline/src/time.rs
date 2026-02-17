@@ -3,7 +3,11 @@ use std::{
     error::Error,
     ops::{Add, AddAssign, Sub, SubAssign},
 };
-use tehuti::{buffer::Buffer, codec::Codec, replication::Replicable};
+use tehuti::{
+    buffer::Buffer,
+    codec::{Codec, replicable::RepCodec},
+    replication::Replicable,
+};
 
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
@@ -85,12 +89,12 @@ impl Codec for TimeStamp {
     type Value = Self;
 
     fn encode(message: &Self::Value, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
-        u64::encode(&message.0, buffer)?;
+        RepCodec::<u64>::encode(&message.0, buffer)?;
         Ok(())
     }
 
     fn decode(buffer: &mut Buffer) -> Result<Self::Value, Box<dyn Error>> {
-        let ticks = u64::decode(buffer)?;
+        let ticks = RepCodec::<u64>::decode(buffer)?;
         Ok(Self(ticks))
     }
 }

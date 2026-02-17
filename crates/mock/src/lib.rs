@@ -744,6 +744,7 @@ mod tests {
     use std::{error::Error, sync::Arc};
     use tehuti::{
         channel::{ChannelId, ChannelMode, Dispatch},
+        codec::replicable::RepCodec,
         event::Receiver,
         meeting::MeetingUserEvent,
         peer::{PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer, TypedPeerRole},
@@ -779,7 +780,7 @@ mod tests {
         // them bounded, so when new message arrives and there is no more space,
         // oldest message is dropped.
         let factory = Arc::new(PeerFactory::default().with(PeerRoleId::new(0), |builder| {
-            Ok(builder.bind_read_write::<String, String>(
+            Ok(builder.bind_read_write::<RepCodec<String>, String>(
                 ChannelId::new(0),
                 ChannelMode::ReliableOrdered,
                 None,
