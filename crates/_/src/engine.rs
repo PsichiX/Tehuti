@@ -13,6 +13,10 @@ use std::{collections::BTreeMap, error::Error};
 pub struct EngineId(u128);
 
 impl EngineId {
+    pub fn uuid() -> Self {
+        Self::new(typid::ID::<()>::default().uuid().as_u128())
+    }
+
     pub const fn new(id: u128) -> Self {
         Self(id)
     }

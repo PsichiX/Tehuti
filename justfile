@@ -69,8 +69,8 @@ publish:
   sleep 1
   cargo publish --no-verify --manifest-path ./crates/mock/Cargo.toml
   sleep 1
+  cargo publish --no-verify --manifest-path ./crates/socket/Cargo.toml
+  sleep 1
   cargo publish --no-verify --manifest-path ./crates/client-server/Cargo.toml
   sleep 1
   cargo publish --no-verify --manifest-path ./crates/timeline/Cargo.toml
-  sleep 1
-  cargo publish --no-verify --manifest-path ./crates/socket/Cargo.toml

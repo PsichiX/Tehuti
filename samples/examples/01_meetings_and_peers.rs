@@ -10,6 +10,7 @@ use tehuti::{
     },
 };
 use tehuti_mock::mock_recv_matching;
+use tehuti_socket::TcpMeetingConfig;
 
 const ADDRESS: &str = "127.0.0.1:8888";
 const MESSAGE_CHANNEL: ChannelId = ChannelId::new(0);
@@ -24,7 +25,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let factory = PeerFactory::default().with_typed::<ChatRole>();
 
-    tcp_example(is_server, ADDRESS, factory.into(), app)?;
+    tcp_example(
+        is_server,
+        ADDRESS,
+        TcpMeetingConfig::enable_all(),
+        factory.into(),
+        app,
+    )?;
     Ok(())
 }
 

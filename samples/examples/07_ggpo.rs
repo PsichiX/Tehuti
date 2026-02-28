@@ -22,6 +22,7 @@ use tehuti::{
     third_party::{rust_decimal::Decimal, tracing::debug},
 };
 use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
+use tehuti_socket::TcpMeetingConfig;
 use tehuti_timeline::{
     history::{HistoryBuffer, HistoryEvent},
     time::TimeStamp,
@@ -48,7 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Terminal::set_global_log_buffer(log_buffer.clone());
     registry()
         .with(log_buffer.into_layer("debug"))
-        .with(Recorder::default().into_layer("trace"))
+        .with(Recorder::new("./logs").into_layer("trace"))
         .init();
 
     println!("Are you hosting a server? (y/n): ");
@@ -58,7 +59,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let factory = PeerFactory::default().with_typed::<PlayerRole>();
 
-    tcp_example(is_server, ADDRESS, factory.into(), app)?;
+    tcp_example(
+        is_server,
+        ADDRESS,
+        TcpMeetingConfig::enable_all(),
+        factory.into(),
+        app,
+    )?;
     Ok(())
 }
 

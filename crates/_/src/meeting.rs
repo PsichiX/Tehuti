@@ -138,7 +138,7 @@ impl Meeting {
         match event {
             MeetingEngineEvent::PeerJoined(peer_id, role_id) => {
                 let PeerBuildResult {
-                    peer,
+                    mut peer,
                     channels,
                     descriptor,
                 } = self.factory.create(Peer::new(
@@ -150,9 +150,19 @@ impl Meeting {
                     self.user_event.sender.clone(),
                 ))?;
                 if self.peers.contains_key(&peer.info().peer_id) {
-                    return Err(format!("Peer {:?} already exists", peer.info().peer_id).into());
+                    unsafe { peer.set_destroy_on_drop(false) };
+                    return Err(
+                        format!("Joined peer {:?} already exists", peer.info().peer_id).into(),
+                    );
                 }
                 self.peers.insert(peer.info().peer_id, channels);
+                tracing::event!(
+                    target: "tehuti::meeting",
+                    tracing::Level::TRACE,
+                    "Meeting {} peer joined: {:?}",
+                    self.name,
+                    peer.info()
+                );
                 self.engine_event
                     .sender
                     .send(MeetingEngineEvent::PeerCreated(descriptor))
@@ -164,7 +174,13 @@ impl Meeting {
             }
             MeetingEngineEvent::PeerLeft(peer_id) => {
                 if self.peers.remove(&peer_id).is_some() {
-                    self.peers.remove(&peer_id);
+                    tracing::event!(
+                        target: "tehuti::meeting",
+                        tracing::Level::TRACE,
+                        "Meeting {} peer left: {:?}",
+                        self.name,
+                        peer_id
+                    );
                     self.engine_event
                         .sender
                         .send(MeetingEngineEvent::PeerDestroyed(peer_id))
@@ -191,7 +207,7 @@ impl Meeting {
         match event {
             MeetingUserEvent::PeerCreate(peer_id, role_id) => {
                 let PeerBuildResult {
-                    peer,
+                    mut peer,
                     channels,
                     descriptor,
                 } = self.factory.create(Peer::new(
@@ -203,9 +219,19 @@ impl Meeting {
                     self.user_event.sender.clone(),
                 ))?;
                 if self.peers.contains_key(&peer.info().peer_id) {
-                    return Err(format!("Peer {:?} already exists", peer.info().peer_id).into());
+                    unsafe { peer.set_destroy_on_drop(false) };
+                    return Err(
+                        format!("Created peer {:?} already exists", peer.info().peer_id).into(),
+                    );
                 }
                 self.peers.insert(peer.info().peer_id, channels);
+                tracing::event!(
+                    target: "tehuti::meeting",
+                    tracing::Level::TRACE,
+                    "Meeting {} peer created: {:?}",
+                    self.name,
+                    peer.info()
+                );
                 self.engine_event
                     .sender
                     .send(MeetingEngineEvent::PeerCreated(descriptor))
@@ -217,7 +243,13 @@ impl Meeting {
             }
             MeetingUserEvent::PeerDestroy(peer_id) => {
                 if self.peers.remove(&peer_id).is_some() {
-                    self.peers.remove(&peer_id);
+                    tracing::event!(
+                        target: "tehuti::meeting",
+                        tracing::Level::TRACE,
+                        "Meeting {} peer destroyed: {:?}",
+                        self.name,
+                        peer_id
+                    );
                     self.engine_event
                         .sender
                         .send(MeetingEngineEvent::PeerLeft(peer_id))

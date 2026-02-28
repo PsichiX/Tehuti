@@ -22,6 +22,7 @@ use tehuti::{
 };
 use tehuti_client_server::authority::{Authority, AuthorityUserData};
 use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
+use tehuti_socket::TcpMeetingConfig;
 use tehuti_timeline::{
     clock::{Clock, ClockEvent},
     history::{HistoryBuffer, HistoryEvent},
@@ -61,7 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Terminal::set_global_log_buffer(log_buffer.clone());
     registry()
         .with(log_buffer.into_layer("debug"))
-        .with(Recorder::default().into_layer("trace"))
+        .with(Recorder::new("./logs").into_layer("trace"))
         .init();
 
     println!("Are you hosting a server? (y/n): ");
@@ -71,7 +72,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let factory = TimelineAuthority::peer_factory(is_server)?.with_typed::<PlayerRole>();
 
-    tcp_example(is_server, ADDRESS, factory.into(), app)?;
+    tcp_example(
+        is_server,
+        ADDRESS,
+        TcpMeetingConfig::enable_all().warn_unknown_channel_packet(false),
+        factory.into(),
+        app,
+    )?;
     Ok(())
 }
 

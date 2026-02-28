@@ -220,18 +220,21 @@ impl<Extension: TypedPeer> Authority<Extension> {
                 replica_id_generator,
                 ..
             }) => {
-                for event in events.receiver.iter() {
-                    if let AuthorityEvent::Request(event_id, request) = event.message {
+                for Dispatch {
+                    message, sender, ..
+                } in events.receiver.iter()
+                {
+                    if let AuthorityEvent::Request(event_id, request) = message {
                         match request {
                             AuthorityRequest::CreatePeer(role_id) => {
                                 *peer_id_generator += 1;
                                 let peer_id = PeerId::new(*peer_id_generator);
                                 events.sender.send(
-                                    AuthorityEvent::Response(
+                                    Dispatch::new(AuthorityEvent::Response(
                                         event_id,
                                         AuthorityResponse::CreatePeer(peer_id, role_id),
-                                    )
-                                    .into(),
+                                    ))
+                                    .maybe_recepient(sender),
                                 )?;
                             }
                             AuthorityRequest::DestroyPeer(peer_id) => {
@@ -246,11 +249,11 @@ impl<Extension: TypedPeer> Authority<Extension> {
                                 *replica_id_generator += 1;
                                 let replica_id = ReplicaId::new(*replica_id_generator);
                                 events.sender.send(
-                                    AuthorityEvent::Response(
+                                    Dispatch::new(AuthorityEvent::Response(
                                         event_id,
                                         AuthorityResponse::ReplicaId(replica_id),
-                                    )
-                                    .into(),
+                                    ))
+                                    .maybe_recepient(sender),
                                 )?;
                             }
                         }
@@ -263,8 +266,8 @@ impl<Extension: TypedPeer> Authority<Extension> {
                 ..
             }) => {
                 for _ in replica_id_requests.extract_if(|_, receiver| receiver.is_disconnected()) {}
-                for event in events.receiver.iter() {
-                    if let AuthorityEvent::Response(event_id, response) = event.message {
+                for Dispatch { message, .. } in events.receiver.iter() {
+                    if let AuthorityEvent::Response(event_id, response) = message {
                         match response {
                             AuthorityResponse::CreatePeer(peer_id, role_id) => {
                                 if role_id == AUTHORITY_ROLE {
@@ -290,7 +293,6 @@ impl<Extension: TypedPeer> Authority<Extension> {
     }
 }
 
-// TODO: allow user to define additional events for their use?
 enum Role<Extension: TypedPeer> {
     Server {
         events: Duplex<Dispatch<AuthorityEvent>>,

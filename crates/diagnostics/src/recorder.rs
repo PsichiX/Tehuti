@@ -1,6 +1,6 @@
 use chrono::Utc;
 use std::{
-    fs::OpenOptions,
+    fs::{OpenOptions, create_dir_all},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -55,7 +55,44 @@ impl Recorder {
                 Default::default()
             }
         };
+        let _ = create_dir_all(&self.directory);
+        let mut file_path = self.directory.to_owned();
+        file_path.push(format!(
+            "{}.{}.log",
+            self.file_name,
+            Utc::now().format("%Y-%m-%d_%H-%M-%S")
+        ));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .unwrap_or_else(|err| {
+                panic!(
+                    "Could not open diagnostics log: {:?}. Error: {:?}",
+                    file_path, err
+                )
+            });
 
+        layer()
+            .with_ansi(false)
+            .pretty()
+            .with_writer(Mutex::new(file))
+            .with_target(true)
+            .with_filter(filter)
+    }
+
+    pub fn into_layer_json<S: Subscriber + for<'span> LookupSpan<'span>>(
+        self,
+        filter: &str,
+    ) -> impl Layer<S> {
+        let filter = match filter.parse::<Targets>() {
+            Ok(filter) => filter,
+            Err(err) => {
+                println!("Failed to parse tracing filter: {err}");
+                Default::default()
+            }
+        };
+        let _ = create_dir_all(&self.directory);
         let mut file_path = self.directory.to_owned();
         file_path.push(format!(
             "{}.{}.log",

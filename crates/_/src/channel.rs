@@ -59,6 +59,7 @@ impl std::fmt::Display for ChannelId {
 pub struct Dispatch<Message: Send + 'static> {
     pub message: Message,
     pub recepients: PacketRecepients,
+    pub sender: Option<EngineId>,
 }
 
 impl<Message: Send + 'static> Dispatch<Message> {
@@ -66,6 +67,7 @@ impl<Message: Send + 'static> Dispatch<Message> {
         Self {
             message,
             recepients: Default::default(),
+            sender: None,
         }
     }
 
@@ -74,8 +76,25 @@ impl<Message: Send + 'static> Dispatch<Message> {
         self
     }
 
+    pub fn maybe_recepient(mut self, engine_id: Option<EngineId>) -> Self {
+        if let Some(engine_id) = engine_id {
+            self.recepients.push(engine_id);
+        }
+        self
+    }
+
     pub fn recepients(mut self, engine_ids: impl IntoIterator<Item = EngineId>) -> Self {
         self.recepients.extend(engine_ids);
+        self
+    }
+
+    pub fn sender(mut self, engine_id: EngineId) -> Self {
+        self.sender = Some(engine_id);
+        self
+    }
+
+    pub fn maybe_sender(mut self, engine_id: Option<EngineId>) -> Self {
+        self.sender = engine_id;
         self
     }
 }
@@ -100,7 +119,6 @@ pub enum ChannelMode {
 pub enum ChannelKind {
     Read,
     Write,
-    Pipe,
 }
 
 /// Type-erased channels used for converting between messages and bytes,
@@ -135,7 +153,11 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
-            if let Some(ProtocolPacketData { data, recepients }) = state.packet_receiver.try_recv()
+            if let Some(ProtocolPacketData {
+                data,
+                recepients,
+                sender,
+            }) = state.packet_receiver.try_recv()
             {
                 let mut buffer = Cursor::new(data);
                 let message = C::decode(&mut buffer)?;
@@ -144,6 +166,7 @@ impl Channel {
                     .send(Dispatch {
                         message,
                         recepients,
+                        sender,
                     })
                     .map_err(|err| format!("Pump message sender error: {err}"))?;
                 Ok(true)
@@ -159,7 +182,12 @@ impl Channel {
             let state = state
                 .downcast_mut::<State<Message>>()
                 .ok_or("Failed to downcast read channel state")?;
-            for ProtocolPacketData { data, recepients } in state.packet_receiver.iter() {
+            for ProtocolPacketData {
+                data,
+                recepients,
+                sender,
+            } in state.packet_receiver.iter()
+            {
                 let mut buffer = Cursor::new(data);
                 let message = C::decode(&mut buffer)?;
                 state
@@ -167,6 +195,7 @@ impl Channel {
                     .send(Dispatch {
                         message,
                         recepients,
+                        sender,
                     })
                     .map_err(|err| format!("Pump-all message sender error: {err}"))?;
                 count += 1;
@@ -204,6 +233,7 @@ impl Channel {
             if let Some(Dispatch {
                 message,
                 recepients,
+                sender,
             }) = state.message_receiver.try_recv()
             {
                 let mut buffer = Cursor::new(Vec::new());
@@ -213,6 +243,7 @@ impl Channel {
                     .send(ProtocolPacketData {
                         data: buffer.into_inner(),
                         recepients,
+                        sender,
                     })
                     .map_err(|err| format!("Pump packet sender error: {err}"))?;
                 Ok(true)
@@ -231,6 +262,7 @@ impl Channel {
             for Dispatch {
                 message,
                 recepients,
+                sender,
             } in state.message_receiver.iter()
             {
                 let mut buffer = Cursor::new(Vec::new());
@@ -240,6 +272,7 @@ impl Channel {
                     .send(ProtocolPacketData {
                         data: buffer.into_inner(),
                         recepients,
+                        sender,
                     })
                     .map_err(|err| format!("Pump-all packet sender error: {err}"))?;
                 count += 1;
@@ -331,6 +364,7 @@ mod tests {
             .send(ProtocolPacketData {
                 data: buffer.into_inner(),
                 recepients: Default::default(),
+                sender: None,
             })
             .unwrap();
 

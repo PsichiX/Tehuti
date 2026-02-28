@@ -3,7 +3,7 @@ use std::{
     error::Error,
     future::pending,
     io::{Cursor, ErrorKind, Read, Write},
-    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::Arc,
     thread::{Builder, JoinHandle, sleep},
     time::Duration,
@@ -17,24 +17,81 @@ use tehuti::{
     protocol::{ProtocolControlFrame, ProtocolFrame, ProtocolPacketFrame},
 };
 
-pub fn ip_to_engine_id(addr: IpAddr) -> EngineId {
-    let bits = match addr {
-        IpAddr::V4(addr) => addr.to_bits() as u128,
-        IpAddr::V6(addr) => addr.to_bits(),
-    };
-    EngineId::new(bits)
-}
-
 pub enum TcpMeetingEvent {
     RegisterSession {
         local_addr: SocketAddr,
         peer_addr: SocketAddr,
+        engine_id: EngineId,
         frames: Duplex<ProtocolFrame>,
     },
     UnregisterSession {
         local_addr: SocketAddr,
         peer_addr: SocketAddr,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpMeetingConfig {
+    pub warn_unhandled_control_frame: bool,
+    pub warn_duplicate_peer_creation: bool,
+    pub warn_unknown_peer_destruction: bool,
+    pub warn_unknown_peer_packet: bool,
+    pub warn_unknown_channel_packet: bool,
+    pub warn_unhandled_engine_event: bool,
+}
+
+impl TcpMeetingConfig {
+    pub fn disable_all() -> Self {
+        Self {
+            warn_unhandled_control_frame: false,
+            warn_duplicate_peer_creation: false,
+            warn_unknown_peer_destruction: false,
+            warn_unknown_peer_packet: false,
+            warn_unknown_channel_packet: false,
+            warn_unhandled_engine_event: false,
+        }
+    }
+
+    pub fn enable_all() -> Self {
+        Self {
+            warn_unhandled_control_frame: true,
+            warn_duplicate_peer_creation: true,
+            warn_unknown_peer_destruction: true,
+            warn_unknown_peer_packet: true,
+            warn_unknown_channel_packet: true,
+            warn_unhandled_engine_event: true,
+        }
+    }
+
+    pub fn warn_unhandled_control_frame(mut self, value: bool) -> Self {
+        self.warn_unhandled_control_frame = value;
+        self
+    }
+
+    pub fn warn_duplicate_peer_creation(mut self, value: bool) -> Self {
+        self.warn_duplicate_peer_creation = value;
+        self
+    }
+
+    pub fn warn_unknown_peer_destruction(mut self, value: bool) -> Self {
+        self.warn_unknown_peer_destruction = value;
+        self
+    }
+
+    pub fn warn_unknown_peer_packet(mut self, value: bool) -> Self {
+        self.warn_unknown_peer_packet = value;
+        self
+    }
+
+    pub fn warn_unknown_channel_packet(mut self, value: bool) -> Self {
+        self.warn_unknown_channel_packet = value;
+        self
+    }
+
+    pub fn warn_unhandled_engine_event(mut self, value: bool) -> Self {
+        self.warn_unhandled_engine_event = value;
+        self
+    }
 }
 
 pub struct TcpMeetingResult {
@@ -44,15 +101,20 @@ pub struct TcpMeetingResult {
 }
 
 pub struct TcpMeeting {
+    pub config: TcpMeetingConfig,
     meeting: Meeting,
     engine_event: Duplex<MeetingEngineEvent>,
     peers: BTreeMap<PeerId, EnginePeerDescriptor>,
-    sessions: HashMap<(SocketAddr, SocketAddr), Duplex<ProtocolFrame>>,
+    sessions: HashMap<(SocketAddr, SocketAddr), (Duplex<ProtocolFrame>, EngineId)>,
     events_receiver: Receiver<TcpMeetingEvent>,
 }
 
 impl TcpMeeting {
-    pub fn make(name: impl ToString, factory: Arc<PeerFactory>) -> TcpMeetingResult {
+    pub fn make(
+        name: impl ToString,
+        config: TcpMeetingConfig,
+        factory: Arc<PeerFactory>,
+    ) -> TcpMeetingResult {
         let MeetingInterfaceResult {
             meeting,
             interface,
@@ -61,6 +123,7 @@ impl TcpMeeting {
         let (events_sender, events_receiver) = unbounded();
         TcpMeetingResult {
             meeting: Self {
+                config,
                 meeting,
                 engine_event,
                 peers: Default::default(),
@@ -79,16 +142,27 @@ impl TcpMeeting {
                 TcpMeetingEvent::RegisterSession {
                     local_addr,
                     peer_addr,
+                    engine_id,
                     frames,
                 } => {
                     tracing::event!(
                         target: "tehuti::socket::session",
                         tracing::Level::TRACE,
-                        "Meeting registering session: {:?}<->{:?}",
+                        "Meeting registering session: {:?}<->{:?}, engine ID: {:?}",
                         local_addr,
                         peer_addr,
+                        engine_id,
                     );
                     for descriptor in self.peers.values() {
+                        tracing::event!(
+                            target: "tehuti::socket::session",
+                            tracing::Level::TRACE,
+                            "Meeting session: {:?}<->{:?} register sending create peer {:?} with role {:?}",
+                            local_addr,
+                            peer_addr,
+                            descriptor.info.peer_id,
+                            descriptor.info.role_id,
+                        );
                         let frame = ProtocolFrame::Control(ProtocolControlFrame::CreatePeer(
                             descriptor.info.peer_id,
                             descriptor.info.role_id,
@@ -100,7 +174,8 @@ impl TcpMeeting {
                             )
                         })?;
                     }
-                    self.sessions.insert((local_addr, peer_addr), frames);
+                    self.sessions
+                        .insert((local_addr, peer_addr), (frames, engine_id));
                 }
                 TcpMeetingEvent::UnregisterSession {
                     local_addr,
@@ -119,12 +194,22 @@ impl TcpMeeting {
         }
 
         // Process receiving frames from all sessions.
-        for ((local_addr, peer_addr), frames) in &self.sessions {
+        for ((local_addr, peer_addr), (frames, _)) in &self.sessions {
             for frame in frames.receiver.iter() {
                 match frame {
                     ProtocolFrame::Control(frame) => {
-                        for ((local_addr2, peer_addr2), frames2) in &self.sessions {
+                        for ((local_addr2, peer_addr2), (frames2, _)) in &self.sessions {
                             if peer_addr != peer_addr2 {
+                                tracing::event!(
+                                    target: "tehuti::socket::session",
+                                    tracing::Level::TRACE,
+                                    "Meeting session {:?}<->{:?} forwarding control frame to {:?}<->{:?}: {:?}",
+                                    local_addr,
+                                    peer_addr,
+                                    local_addr2,
+                                    peer_addr2,
+                                    frame,
+                                );
                                 frames2
                                     .sender
                                     .send(ProtocolFrame::Control(frame.clone()))
@@ -149,16 +234,16 @@ impl TcpMeeting {
                                     peer_role_id,
                                 );
                                 self.engine_event
-                                .sender
-                                .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
-                                .map_err(|err| {
-                                    format!(
-                                        "Meeting session {:?}<->{:?} outside engine sender error: {err}",
-                                        local_addr,
-                                        peer_addr
-                                    )
-                                })
-                                .unwrap();
+                                    .sender
+                                    .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
+                                    .map_err(|err| {
+                                        format!(
+                                            "Meeting session {:?}<->{:?} outside engine sender error: {err}",
+                                            local_addr,
+                                            peer_addr
+                                        )
+                                    })
+                                    .unwrap();
                             }
                             ProtocolControlFrame::DestroyPeer(peer_id) => {
                                 tracing::event!(
@@ -170,40 +255,51 @@ impl TcpMeeting {
                                     peer_id,
                                 );
                                 self.engine_event
-                                .sender
-                                .send(MeetingEngineEvent::PeerLeft(peer_id))
-                                .map_err(|err| {
-                                    format!(
-                                        "Meeting session {:?}<->{:?} outside engine sender error: {err}",
-                                        local_addr,
-                                        peer_addr
-                                    )
-                                })
-                                .unwrap();
+                                    .sender
+                                    .send(MeetingEngineEvent::PeerLeft(peer_id))
+                                    .map_err(|err| {
+                                        format!(
+                                            "Meeting session {:?}<->{:?} outside engine sender error: {err}",
+                                            local_addr,
+                                            peer_addr
+                                        )
+                                    })
+                                    .unwrap();
                             }
                             _ => {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::WARN,
-                                    "Meeting session {:?}<->{:?} got unhandled control frame: {:?}",
-                                    local_addr,
-                                    peer_addr,
-                                    frame,
-                                );
+                                if self.config.warn_unhandled_control_frame {
+                                    tracing::event!(
+                                        target: "tehuti::socket::session",
+                                        tracing::Level::WARN,
+                                        "Meeting session {:?}<->{:?} got unhandled control frame: {:?}",
+                                        local_addr,
+                                        peer_addr,
+                                        frame,
+                                    );
+                                }
                             }
                         }
                     }
                     ProtocolFrame::Packet(frame) => {
-                        for ((local_addr2, peer_addr2), frames2) in &self.sessions {
+                        for ((local_addr2, peer_addr2), (frames2, engine_id2)) in &self.sessions {
                             if !frame.data.recepients.is_empty()
-                                && !frame
-                                    .data
-                                    .recepients
-                                    .contains(&ip_to_engine_id(peer_addr2.ip()))
+                                && !frame.data.recepients.contains(engine_id2)
                             {
                                 continue;
                             }
                             if peer_addr != peer_addr2 {
+                                tracing::event!(
+                                    target: "tehuti::socket::session",
+                                    tracing::Level::TRACE,
+                                    "Meeting session {:?}<->{:?} forwarding packet frame for peer {:?} channel {:?} to {:?}<->{:?}. {} bytes",
+                                    local_addr,
+                                    peer_addr,
+                                    frame.peer_id,
+                                    frame.channel_id,
+                                    local_addr2,
+                                    peer_addr2,
+                                    frame.data.data.len(),
+                                );
                                 frames2
                                     .sender
                                     .send(ProtocolFrame::Packet(frame.clone()))
@@ -239,7 +335,7 @@ impl TcpMeeting {
                                         )
                                     })
                                     .unwrap();
-                            } else {
+                            } else if self.config.warn_unknown_channel_packet {
                                 tracing::event!(
                                     target: "tehuti::socket::session",
                                     tracing::Level::WARN,
@@ -250,7 +346,7 @@ impl TcpMeeting {
                                     frame.peer_id,
                                 );
                             }
-                        } else {
+                        } else if self.config.warn_unknown_peer_packet {
                             tracing::event!(
                                 target: "tehuti::socket::session",
                                 tracing::Level::WARN,
@@ -276,10 +372,8 @@ impl TcpMeeting {
                         channel_id: *channel_id,
                         data,
                     });
-                    for ((local_addr, peer_addr), frames) in &self.sessions {
-                        if !recepients.is_empty()
-                            && !recepients.contains(&ip_to_engine_id(peer_addr.ip()))
-                        {
+                    for ((local_addr, peer_addr), (frames, engine_id)) in &self.sessions {
+                        if !recepients.is_empty() && !recepients.contains(engine_id) {
                             continue;
                         }
                         tracing::event!(
@@ -338,11 +432,11 @@ impl TcpMeeting {
                                 descriptor.info.peer_id,
                                 descriptor.info.role_id,
                             ));
-                            for ((local_addr, peer_addr), frames) in &self.sessions {
+                            for ((local_addr, peer_addr), (frames, _)) in &self.sessions {
                                 tracing::event!(
                                     target: "tehuti::socket::session",
                                     tracing::Level::TRACE,
-                                    "Meeting session {:?}<->{:?} creating peer {:?} with role {:?}",
+                                    "Meeting session {:?}<->{:?} sending create peer {:?} with role {:?}",
                                     local_addr,
                                     peer_addr,
                                     descriptor.info.peer_id,
@@ -357,7 +451,7 @@ impl TcpMeeting {
                             }
                         }
                         entry.insert(descriptor);
-                    } else {
+                    } else if self.config.warn_duplicate_peer_creation {
                         tracing::event!(
                             target: "tehuti::socket::session",
                             tracing::Level::WARN,
@@ -376,11 +470,11 @@ impl TcpMeeting {
                         );
                         let frame =
                             ProtocolFrame::Control(ProtocolControlFrame::DestroyPeer(peer_id));
-                        for ((local_addr, peer_addr), frames) in &self.sessions {
+                        for ((local_addr, peer_addr), (frames, _)) in &self.sessions {
                             tracing::event!(
                                 target: "tehuti::socket::session",
                                 tracing::Level::TRACE,
-                                "Meeting session {:?}<->{:?} destroying peer {:?}",
+                                "Meeting session {:?}<->{:?} sending destroy peer {:?}",
                                 local_addr,
                                 peer_addr,
                                 peer_id,
@@ -393,7 +487,7 @@ impl TcpMeeting {
                             })?;
                         }
                         self.peers.remove(&peer_id);
-                    } else {
+                    } else if self.config.warn_unknown_peer_destruction {
                         tracing::event!(
                             target: "tehuti::socket::session",
                             tracing::Level::WARN,
@@ -403,12 +497,14 @@ impl TcpMeeting {
                     }
                 }
                 event => {
-                    tracing::event!(
-                        target: "tehuti::socket::session",
-                        tracing::Level::WARN,
-                        "Meeting got unhandled engine event: {:?}",
-                        event,
-                    );
+                    if self.config.warn_unhandled_engine_event {
+                        tracing::event!(
+                            target: "tehuti::socket::session",
+                            tracing::Level::WARN,
+                            "Meeting got unhandled engine event: {:?}",
+                            event,
+                        );
+                    }
                 }
             }
         }
@@ -462,27 +558,46 @@ impl TcpMeeting {
     }
 }
 
+pub struct TcpHostSessionEvent {
+    pub local_addr: SocketAddr,
+    pub peer_addr: SocketAddr,
+    pub engine_id: EngineId,
+    pub frames: Duplex<ProtocolFrame>,
+    pub terminate_sender: Sender<()>,
+}
+
 pub struct TcpHost {
     listener: TcpListener,
+    local_engine_id: EngineId,
 }
 
 impl TcpHost {
-    pub fn new(listener: TcpListener) -> Result<Self, Box<dyn Error>> {
+    pub fn new(listener: TcpListener, local_engine_id: EngineId) -> Result<Self, Box<dyn Error>> {
         listener.set_nonblocking(true)?;
-        Ok(TcpHost { listener })
-    }
-
-    pub fn my_engine_id(&self) -> Result<EngineId, Box<dyn Error>> {
-        Ok(ip_to_engine_id(self.local_addr()?.ip()))
+        tracing::event!(
+            target: "tehuti::socket::host",
+            tracing::Level::TRACE,
+            "TcpHost created. Local address: {:?}, local engine ID: {:?}",
+            listener.local_addr()?,
+            local_engine_id
+        );
+        Ok(TcpHost {
+            listener,
+            local_engine_id,
+        })
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, Box<dyn Error>> {
         Ok(self.listener.local_addr()?)
     }
 
+    pub fn local_engine_id(&self) -> EngineId {
+        self.local_engine_id
+    }
+
     pub fn accept(&self) -> Result<Option<TcpSessionResult>, Box<dyn Error>> {
         match self.listener.accept() {
-            Ok((stream, _)) => match TcpSession::make(stream) {
+            Ok((stream, _)) => match TcpSession::make(stream, self.local_engine_id) {
                 Ok(session_result) => {
                     return Ok(Some(session_result));
                 }
@@ -530,11 +645,12 @@ impl TcpHost {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn run(
         self,
         interval: Duration,
         session_interval: Duration,
-        session_sender: Sender<(SocketAddr, SocketAddr, Duplex<ProtocolFrame>, Sender<()>)>,
+        session_sender: Sender<TcpHostSessionEvent>,
         terminate_receiver: Receiver<()>,
     ) -> Result<JoinHandle<()>, Box<dyn Error>> {
         Ok(Builder::new()
@@ -554,12 +670,13 @@ impl TcpHost {
                         Ok(Some(session_result)) => {
                             let (terminate_sender, terminate_receiver) = unbounded();
                             let TcpSessionResult { session, frames } = session_result;
-                            if let Err(err) = session_sender.send((
-                                session.local_addr().unwrap(),
-                                session.peer_addr().unwrap(),
+                            if let Err(err) = session_sender.send(TcpHostSessionEvent {
+                                local_addr: session.local_addr().unwrap(),
+                                peer_addr: session.peer_addr().unwrap(),
+                                engine_id: session.remote_engine_id(),
                                 frames,
                                 terminate_sender,
-                            )) {
+                            }) {
                                 tracing::event!(
                                     target: "tehuti::socket::host",
                                     tracing::Level::ERROR,
@@ -599,6 +716,8 @@ pub struct TcpSessionResult {
 
 pub struct TcpSession {
     stream: TcpStream,
+    local_engine_id: EngineId,
+    remote_engine_id: EngineId,
     buffer_in: Vec<u8>,
     buffer_out: Vec<u8>,
     frames: Duplex<ProtocolFrame>,
@@ -606,12 +725,46 @@ pub struct TcpSession {
 }
 
 impl TcpSession {
-    pub fn make(stream: TcpStream) -> Result<TcpSessionResult, Box<dyn Error>> {
+    pub fn make(
+        mut stream: TcpStream,
+        local_engine_id: EngineId,
+    ) -> Result<TcpSessionResult, Box<dyn Error>> {
+        stream.set_nodelay(true)?;
         stream.set_nonblocking(true)?;
+        stream.write_all(&local_engine_id.id().to_le_bytes())?;
+        let mut remote_engine_id_bytes = [0u8; std::mem::size_of::<u128>()];
+        stream.flush()?;
+        loop {
+            match stream.read_exact(&mut remote_engine_id_bytes) {
+                Ok(()) => break,
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => {
+                    return Err(format!(
+                        "Session {:?}<->{:?} stream hyandshake read error: {}",
+                        stream.local_addr().unwrap(),
+                        stream.peer_addr().unwrap(),
+                        e
+                    )
+                    .into());
+                }
+            }
+        }
+        let remote_engine_id = EngineId::new(u128::from_le_bytes(remote_engine_id_bytes));
         let (frames_inside, frames_outside) = Duplex::crossing_unbounded();
+        tracing::event!(
+            target: "tehuti::socket::session",
+            tracing::Level::TRACE,
+            "Session created. Local address: {:?}, peer address: {:?}, local engine ID: {:?}, remote engine ID: {:?}",
+            stream.local_addr()?,
+            stream.peer_addr()?,
+            local_engine_id,
+            remote_engine_id,
+        );
         Ok(TcpSessionResult {
             session: Self {
                 stream,
+                local_engine_id,
+                remote_engine_id,
                 buffer_in: Default::default(),
                 buffer_out: Default::default(),
                 frames: frames_inside,
@@ -621,20 +774,20 @@ impl TcpSession {
         })
     }
 
-    pub fn my_engine_id(&self) -> Result<EngineId, Box<dyn Error>> {
-        Ok(ip_to_engine_id(self.local_addr()?.ip()))
-    }
-
-    pub fn other_engine_id(&self) -> Result<EngineId, Box<dyn Error>> {
-        Ok(ip_to_engine_id(self.peer_addr()?.ip()))
-    }
-
     pub fn local_addr(&self) -> Result<SocketAddr, Box<dyn Error>> {
         Ok(self.stream.local_addr()?)
     }
 
     pub fn peer_addr(&self) -> Result<SocketAddr, Box<dyn Error>> {
         Ok(self.stream.peer_addr()?)
+    }
+
+    pub fn local_engine_id(&self) -> EngineId {
+        self.local_engine_id
+    }
+
+    pub fn remote_engine_id(&self) -> EngineId {
+        self.remote_engine_id
     }
 
     pub fn maintain(&mut self) -> Result<(), Box<dyn Error>> {
@@ -660,7 +813,15 @@ impl TcpSession {
                     self.buffer_in.extend_from_slice(&buffer[..n]);
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(e) => return Err(Box::new(e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Session {:?}<->{:?} stream read error: {}",
+                        self.stream.local_addr().unwrap(),
+                        self.stream.peer_addr().unwrap(),
+                        e
+                    )
+                    .into());
+                }
             }
         }
         let mut cursor = Cursor::new(&self.buffer_in);
@@ -674,7 +835,12 @@ impl TcpSession {
         }
         let pos = cursor.position() as usize;
         self.buffer_in.drain(0..pos);
-        for frame in frames {
+        for mut frame in frames {
+            if let ProtocolFrame::Packet(frame) = &mut frame
+                && frame.data.sender.is_none()
+            {
+                frame.data.sender = Some(self.remote_engine_id);
+            }
             self.frames.sender.send(frame).map_err(|err| {
                 format!(
                     "Session {:?}<->{:?} frame sender error: {}",
@@ -688,7 +854,10 @@ impl TcpSession {
     }
 
     fn send_frames(&mut self) -> Result<(), Box<dyn Error>> {
-        for frame in self.frames.receiver.iter() {
+        for mut frame in self.frames.receiver.iter() {
+            if let ProtocolFrame::Packet(frame) = &mut frame {
+                frame.data.sender = Some(self.local_engine_id);
+            }
             frame.write(&mut self.buffer_out)?;
         }
         loop {
@@ -698,7 +867,15 @@ impl TcpSession {
                     self.buffer_out.drain(0..n);
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(e) => return Err(Box::new(e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Session {:?}<->{:?} stream write error: {}",
+                        self.stream.local_addr().unwrap(),
+                        self.stream.peer_addr().unwrap(),
+                        e
+                    )
+                    .into());
+                }
             }
         }
         Ok(())
@@ -810,7 +987,7 @@ mod tests {
                 meeting,
                 interface,
                 events_sender,
-            } = TcpMeeting::make("Server", factory);
+            } = TcpMeeting::make("Server", TcpMeetingConfig::enable_all(), factory);
             let (terminate_meeting_sender, terminate_meeting_receiver) = unbounded();
             let meeting_thread = meeting
                 .run(Duration::ZERO, terminate_meeting_receiver)
@@ -820,7 +997,8 @@ mod tests {
             println!("* Server listening on {:?}", listener.local_addr().unwrap());
             let (session_sender, session_receiver) = unbounded();
             let (terminate_host_sender, terminate_host_receiver) = unbounded();
-            let host_thread = TcpHost::new(listener)
+            let host_engine_id = EngineId::uuid();
+            let host_thread = TcpHost::new(listener, host_engine_id)
                 .unwrap()
                 .run(
                     Duration::ZERO,
@@ -830,13 +1008,19 @@ mod tests {
                 )
                 .unwrap();
 
-            let (local_addr, peer_addr, frames, terminate_session_sender) =
-                session_receiver.recv_blocking().unwrap();
+            let TcpHostSessionEvent {
+                local_addr,
+                peer_addr,
+                engine_id,
+                frames,
+                terminate_sender: terminate_session_sender,
+            } = session_receiver.recv_blocking().unwrap();
             println!("* Server accepted connection from {:?}", peer_addr);
             events_sender
                 .send(TcpMeetingEvent::RegisterSession {
                     local_addr,
                     peer_addr,
+                    engine_id,
                     frames,
                 })
                 .unwrap();
@@ -887,7 +1071,7 @@ mod tests {
                 meeting,
                 interface,
                 events_sender,
-            } = TcpMeeting::make("Client", factory);
+            } = TcpMeeting::make("Client", TcpMeetingConfig::enable_all(), factory);
             let (terminate_meeting_sender, terminate_meeting_receiver) = unbounded();
             let meeting_thread = meeting
                 .run(Duration::ZERO, terminate_meeting_receiver)
@@ -900,11 +1084,14 @@ mod tests {
                 stream.peer_addr().unwrap()
             );
 
-            let TcpSessionResult { session, frames } = TcpSession::make(stream).unwrap();
+            let session_engine_id = EngineId::uuid();
+            let TcpSessionResult { session, frames } =
+                TcpSession::make(stream, session_engine_id).unwrap();
             events_sender
                 .send(TcpMeetingEvent::RegisterSession {
                     local_addr: session.local_addr().unwrap(),
                     peer_addr: session.peer_addr().unwrap(),
+                    engine_id: session_engine_id,
                     frames,
                 })
                 .unwrap();

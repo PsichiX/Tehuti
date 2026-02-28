@@ -17,12 +17,12 @@ use tehuti_client_server::{
     puppet::{Puppet, Puppetable},
 };
 use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
+use tehuti_socket::TcpMeetingConfig;
 use tracing_subscriber::{layer::SubscriberExt, registry, util::SubscriberInitExt};
 
 const ADDRESS: &str = "127.0.0.1:8888";
 const PLAYER_EVENT_CHANNEL: ChannelId = ChannelId::new(0);
 const PLAYER_CHANGE_CHANNEL: ChannelId = ChannelId::new(1);
-const PLAYER_RPC_CHANNEL: ChannelId = ChannelId::new(2);
 const WORLD_SIZE: (i32, i32) = (20, 10);
 const DELTA_TIME: Duration = Duration::from_millis(1000 / 30);
 const SPEED: f32 = 5.0;
@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Terminal::set_global_log_buffer(log_buffer.clone());
     registry()
         .with(log_buffer.into_layer("debug"))
-        .with(Recorder::default().into_layer("trace"))
+        .with(Recorder::new("./logs").into_layer("trace"))
         .init();
 
     println!("Are you hosting a server? (y/n): ");
@@ -45,7 +45,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let factory = PureAuthority::peer_factory(is_server)?.with_typed::<PlayerController>();
 
-    tcp_example(is_server, ADDRESS, factory.into(), app)?;
+    tcp_example(
+        is_server,
+        ADDRESS,
+        TcpMeetingConfig::enable_all(),
+        factory.into(),
+        app,
+    )?;
     Ok(())
 }
 
@@ -205,7 +211,7 @@ impl Game {
                 peer,
                 PLAYER_EVENT_CHANNEL,
                 Some(PLAYER_CHANGE_CHANNEL),
-                Some(PLAYER_RPC_CHANNEL),
+                None,
                 replica_added_sender,
                 replica_removed_sender,
             )?;
@@ -339,12 +345,6 @@ impl TypedPeer for PlayerController {
                     PLAYER_CHANGE_CHANNEL,
                     ChannelMode::ReliableOrdered,
                     None,
-                )
-                // RPC channels should be read-only on remote for simulation.
-                .bind_read::<ReplicationBuffer, ReplicationBuffer>(
-                    PLAYER_RPC_CHANNEL,
-                    ChannelMode::ReliableOrdered,
-                    None,
                 ))
         } else {
             Ok(builder
@@ -356,12 +356,6 @@ impl TypedPeer for PlayerController {
                 // Change channels should be write-only on local for authority.
                 .bind_write::<ReplicationBuffer, ReplicationBuffer>(
                     PLAYER_CHANGE_CHANNEL,
-                    ChannelMode::ReliableOrdered,
-                    None,
-                )
-                // RPC channels should be write-only on local for authority.
-                .bind_write::<ReplicationBuffer, ReplicationBuffer>(
-                    PLAYER_RPC_CHANNEL,
                     ChannelMode::ReliableOrdered,
                     None,
                 ))
@@ -386,8 +380,8 @@ impl Puppetable for Character {
         full_snapshot: bool,
     ) -> Result<(), Box<dyn Error>> {
         if full_snapshot {
-            self.position_x.mark_changed();
-            self.position_y.mark_changed();
+            HashReplicated::mark_changed(&mut self.position_x);
+            HashReplicated::mark_changed(&mut self.position_y);
         }
         collector
             .scope()

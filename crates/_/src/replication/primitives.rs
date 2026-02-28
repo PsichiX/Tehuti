@@ -22,9 +22,6 @@ impl Replicable for bool {
     }
 }
 
-// TODO: use leb128 varints encoding for better compression of small numbers!
-// This will remove the need for separate Rep var int wrappers and make it more
-// ergonomic to use primitive types directly as replicables.
 macro_rules! impl_replicable_for_pod {
     ($($t:ty => $mode:ident),* $(,)?) => {
         $(

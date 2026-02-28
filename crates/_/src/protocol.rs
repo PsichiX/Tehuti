@@ -76,6 +76,7 @@ pub type PacketRecepients = SmallVec<[EngineId; 1]>;
 pub struct ProtocolPacketData {
     pub data: Vec<u8>,
     pub recepients: PacketRecepients,
+    pub sender: Option<EngineId>,
 }
 
 impl std::fmt::Debug for ProtocolPacketData {
@@ -83,6 +84,7 @@ impl std::fmt::Debug for ProtocolPacketData {
         f.debug_struct("ProtocolPacketData")
             .field("data (size)", &self.data.len())
             .field("recepients", &self.recepients)
+            .field("sender", &self.sender)
             .finish()
     }
 }
@@ -92,6 +94,7 @@ impl From<Vec<u8>> for ProtocolPacketData {
         Self {
             data,
             recepients: Default::default(),
+            sender: None,
         }
     }
 }
@@ -114,6 +117,12 @@ impl ProtocolPacketFrame {
         for engine_id in &self.data.recepients {
             stream.write_all(&engine_id.id().to_le_bytes())?;
         }
+        if let Some(sender) = &self.data.sender {
+            stream.write_all(&[1u8])?;
+            stream.write_all(&sender.id().to_le_bytes())?;
+        } else {
+            stream.write_all(&[0u8])?;
+        }
         let data_len = self.data.data.len() as u32;
         stream.write_all(&data_len.to_le_bytes())?;
         stream.write_all(&self.data.data)?;
@@ -135,6 +144,15 @@ impl ProtocolPacketFrame {
             let engine_id = EngineId::new(u128::from_le_bytes(engine_id_bytes));
             recepients.push(engine_id);
         }
+        let mut sender_flag = [0u8; 1];
+        stream.read_exact(&mut sender_flag)?;
+        let sender = if sender_flag[0] == 1 {
+            let mut engine_id_bytes = [0u8; std::mem::size_of::<u128>()];
+            stream.read_exact(&mut engine_id_bytes)?;
+            Some(EngineId::new(u128::from_le_bytes(engine_id_bytes)))
+        } else {
+            None
+        };
         let mut data_len_bytes = [0u8; std::mem::size_of::<u32>()];
         stream.read_exact(&mut data_len_bytes)?;
         let data_len = u32::from_le_bytes(data_len_bytes) as usize;
@@ -143,7 +161,11 @@ impl ProtocolPacketFrame {
         Ok(ProtocolPacketFrame {
             peer_id: PeerId::new(u64::from_le_bytes(peer_id_bytes)),
             channel_id: ChannelId::new(u64::from_le_bytes(channel_id_bytes)),
-            data: ProtocolPacketData { recepients, data },
+            data: ProtocolPacketData {
+                data,
+                recepients,
+                sender,
+            },
         })
     }
 }
@@ -267,6 +289,7 @@ mod tests {
             data: ProtocolPacketData {
                 data: data.clone(),
                 recepients: Default::default(),
+                sender: None,
             },
         };
         let mut buffer = Vec::new();
@@ -279,6 +302,7 @@ mod tests {
                 ProtocolPacketData {
                     data: read_data,
                     recepients,
+                    ..
                 },
         } = ProtocolPacketFrame::read(&mut cursor).unwrap();
         assert_eq!(peer_id.id(), 1);

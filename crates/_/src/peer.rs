@@ -150,6 +150,11 @@ impl PeerKiller {
 impl Drop for PeerKiller {
     fn drop(&mut self) {
         if self.destroy_on_drop {
+            tracing::event!(
+                target: "tehuti::peer",
+                tracing::Level::TRACE,
+                "Destroying Peer {:?}", self.peer_id
+            );
             let _ = self
                 .meeting_sender
                 .send(MeetingUserEvent::PeerDestroy(self.peer_id));
@@ -388,6 +393,15 @@ impl Peer {
             })?;
         let message = receiver.recv_async().await?;
         Ok(message)
+    }
+
+    pub fn will_destroy_on_drop(&self) -> bool {
+        self.killer.destroy_on_drop
+    }
+
+    /// # Safety
+    pub unsafe fn set_destroy_on_drop(&mut self, value: bool) {
+        self.killer.destroy_on_drop = value;
     }
 }
 
@@ -685,7 +699,7 @@ impl PeerFactory {
         tracing::event!(
             target: "tehuti::peer",
             tracing::Level::DEBUG,
-            "Registering peer role id {}", role_id
+            "Registering Peer Role id {:?}", role_id
         );
         self.registry.insert(role_id, Arc::new(builder_fn));
     }
@@ -784,6 +798,7 @@ mod tests {
             .send(ProtocolPacketData {
                 data: buffer.into_inner(),
                 recepients: Default::default(),
+                sender: None,
             })
             .unwrap();
 

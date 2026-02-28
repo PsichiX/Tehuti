@@ -28,7 +28,7 @@ where
     Self: Sized + Default,
     T: Replicable,
 {
-    fn detect_change(&mut self, data: &T) -> bool;
+    fn did_changed(&self, data: &T) -> Option<Self>;
 
     #[allow(unused_variables)]
     fn on_mutation(&mut self, data: &T) {}
@@ -42,11 +42,13 @@ impl<T> ReplicationPolicy<T> for HashRep
 where
     T: Replicable + Hash,
 {
-    fn detect_change(&mut self, data: &T) -> bool {
-        let old_hash = self.0;
+    fn did_changed(&self, data: &T) -> Option<Self> {
         let hash = crate::hash(data);
-        self.0 = hash;
-        old_hash != self.0
+        if self.0 != hash {
+            Some(Self(hash))
+        } else {
+            None
+        }
     }
 }
 
@@ -54,8 +56,8 @@ impl<T> ReplicationPolicy<T> for ()
 where
     T: Replicable,
 {
-    fn detect_change(&mut self, _data: &T) -> bool {
-        true
+    fn did_changed(&self, _: &T) -> Option<Self> {
+        Some(())
     }
 }
 
@@ -69,10 +71,8 @@ impl Default for MutRep {
 }
 
 impl<T: Replicable> ReplicationPolicy<T> for MutRep {
-    fn detect_change(&mut self, _data: &T) -> bool {
-        let old_state = self.0;
-        self.0 = false;
-        old_state
+    fn did_changed(&self, _: &T) -> Option<Self> {
+        if self.0 { Some(Self(false)) } else { None }
     }
 
     fn on_mutation(&mut self, _data: &T) {
@@ -90,10 +90,8 @@ impl Default for ManRep {
 }
 
 impl<T: Replicable> ReplicationPolicy<T> for ManRep {
-    fn detect_change(&mut self, _data: &T) -> bool {
-        let old_state = self.0;
-        self.0 = false;
-        old_state
+    fn did_changed(&self, _: &T) -> Option<Self> {
+        if self.0 { Some(Self(false)) } else { None }
     }
 }
 
@@ -180,13 +178,19 @@ where
         self.data
     }
 
-    pub fn collect_changes(this: &Self, buffer: &mut Buffer) -> Result<bool, Box<dyn Error>> {
-        if this
+    pub fn did_changed(this: &Self) -> Result<bool, Box<dyn Error>> {
+        Ok(this
             .meta
             .lock()
             .map_err(|_| "Replicated meta lock error")?
-            .detect_change(&this.data)
-        {
+            .did_changed(&this.data)
+            .is_some())
+    }
+
+    pub fn collect_changes(this: &Self, buffer: &mut Buffer) -> Result<bool, Box<dyn Error>> {
+        let mut meta = this.meta.lock().map_err(|_| "Replicated meta lock error")?;
+        if let Some(new_meta) = meta.did_changed(&this.data) {
+            *meta = new_meta;
             this.data.collect_changes(buffer)?;
             Ok(true)
         } else {
@@ -198,12 +202,9 @@ where
         this: &Self,
         buffer: &mut Buffer,
     ) -> Result<bool, Box<dyn Error>> {
-        if this
-            .meta
-            .lock()
-            .map_err(|_| "Replicated meta lock error")?
-            .detect_change(&this.data)
-        {
+        let mut meta = this.meta.lock().map_err(|_| "Replicated meta lock error")?;
+        if let Some(new_meta) = meta.did_changed(&this.data) {
+            *meta = new_meta;
             let mut temp_buffer = Cursor::new(Vec::new());
             this.data.collect_changes(&mut temp_buffer)?;
             if temp_buffer.get_ref().is_empty() {
@@ -219,13 +220,13 @@ where
         }
     }
 
-    pub fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
-        self.data.apply_changes(buffer)?;
+    pub fn apply_changes(this: &mut Self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
+        this.data.apply_changes(buffer)?;
         Ok(())
     }
 
     pub fn maybe_apply_changes<const TAG: u8>(
-        &mut self,
+        this: &mut Self,
         buffer: &mut Buffer,
     ) -> Result<(), Box<dyn Error>> {
         let position = buffer.position();
@@ -244,7 +245,7 @@ where
         }
         let data_length = leb128::read::unsigned(buffer)?;
         let start_position = buffer.position();
-        self.data.apply_changes(buffer)?;
+        Self::apply_changes(this, buffer)?;
         let end_position = buffer.position();
         if (end_position - start_position) != data_length {
             buffer.set_position(position);
@@ -258,8 +259,8 @@ where
         Ok(())
     }
 
-    pub fn mark_changed(&mut self) {
-        *self
+    pub fn mark_changed(this: &mut Self) {
+        *this
             .meta
             .lock()
             .unwrap_or_else(|_| panic!("Replicated meta lock error")) = P::default();
@@ -709,7 +710,7 @@ mod tests {
         assert!(!Replicated::collect_changes(&data, &mut buffer).unwrap());
         assert_eq!(buffer.get_ref().len(), 0);
 
-        data.mark_changed();
+        Replicated::mark_changed(&mut data);
 
         let mut buffer = Cursor::default();
         assert!(Replicated::collect_changes(&data, &mut buffer).unwrap());

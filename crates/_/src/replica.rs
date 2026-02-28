@@ -245,13 +245,19 @@ impl ReplicaSet {
         if let Some(change_sender) = &self.change_sender {
             for (replica_id, instance) in &self.instances {
                 if let Some(receiver) = &instance.change_receiver {
-                    for ProtocolPacketData { data, recepients } in receiver.iter() {
+                    for ProtocolPacketData {
+                        data,
+                        recepients,
+                        sender,
+                    } in receiver.iter()
+                    {
                         let _ = change_sender.send(Dispatch {
                             message: ReplicationBuffer {
                                 replica_id: *replica_id,
                                 buffer: data,
                             },
                             recepients,
+                            sender,
                         });
                     }
                 }
@@ -261,14 +267,16 @@ impl ReplicaSet {
             for Dispatch {
                 message,
                 recepients,
+                sender,
             } in change_receiver.iter()
             {
                 if let Some(instance) = self.instances.get_mut(&message.replica_id)
-                    && let Some(sender) = &instance.change_sender
+                    && let Some(change_sender) = &instance.change_sender
                 {
-                    let _ = sender.send(ProtocolPacketData {
+                    let _ = change_sender.send(ProtocolPacketData {
                         data: message.buffer,
                         recepients,
+                        sender,
                     });
                 }
             }
@@ -276,13 +284,19 @@ impl ReplicaSet {
         if let Some(rpc_sender) = &self.rpc_sender {
             for (replica_id, instance) in &self.instances {
                 if let Some(receiver) = &instance.rpc_receiver {
-                    for ProtocolPacketData { data, recepients } in receiver.iter() {
+                    for ProtocolPacketData {
+                        data,
+                        recepients,
+                        sender,
+                    } in receiver.iter()
+                    {
                         let _ = rpc_sender.send(Dispatch {
                             message: ReplicationBuffer {
                                 replica_id: *replica_id,
                                 buffer: data,
                             },
                             recepients,
+                            sender,
                         });
                     }
                 }
@@ -292,14 +306,16 @@ impl ReplicaSet {
             for Dispatch {
                 message,
                 recepients,
+                sender,
             } in rpc_receiver.iter()
             {
                 if let Some(instance) = self.instances.get_mut(&message.replica_id)
-                    && let Some(sender) = &instance.rpc_sender
+                    && let Some(rpc_sender) = &instance.rpc_sender
                 {
-                    let _ = sender.send(ProtocolPacketData {
+                    let _ = rpc_sender.send(ProtocolPacketData {
                         data: message.buffer,
                         recepients,
+                        sender,
                     });
                 }
             }
@@ -394,6 +410,7 @@ impl ReplicaRpcSender {
         self.sender.send(ProtocolPacketData {
             data: buffer.into_inner(),
             recepients: self.recepients.clone(),
+            sender: None,
         })?;
         Ok(())
     }
@@ -457,6 +474,7 @@ impl Drop for ReplicaCollectChanges {
             let _ = self.sender.send(ProtocolPacketData {
                 data: buffer,
                 recepients: self.recepients.clone(),
+                sender: None,
             });
         }
     }

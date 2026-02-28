@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::{
     error::Error,
     net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
@@ -5,48 +7,52 @@ use std::{
     thread::spawn,
     time::Duration,
 };
-use tehuti::{event::unbounded, meeting::MeetingInterface, peer::PeerFactory};
+use tehuti::{engine::EngineId, event::unbounded, meeting::MeetingInterface, peer::PeerFactory};
 use tehuti_socket::{
-    TcpHost, TcpMeeting, TcpMeetingEvent, TcpMeetingResult, TcpSession, TcpSessionResult,
+    TcpHost, TcpHostSessionEvent, TcpMeeting, TcpMeetingConfig, TcpMeetingEvent, TcpMeetingResult,
+    TcpSession, TcpSessionResult,
 };
 
 pub fn tcp_example(
     is_server: bool,
     address: impl ToSocketAddrs,
+    meeting_config: TcpMeetingConfig,
     factory: Arc<PeerFactory>,
-    body: impl FnOnce(bool, MeetingInterface, SocketAddr) -> Result<(), Box<dyn Error>> + 'static,
+    body: impl Fn(bool, MeetingInterface, SocketAddr) -> Result<(), Box<dyn Error>> + 'static,
 ) -> Result<(), Box<dyn Error>> {
     if is_server {
-        tcp_example_server(address, factory, body)
+        tcp_example_server(address, meeting_config, factory, body)
     } else {
-        tcp_example_client(address, factory, body)
+        tcp_example_client(address, meeting_config, factory, body)
     }
 }
 
 pub fn tcp_example_server(
     address: impl ToSocketAddrs,
+    meeting_config: TcpMeetingConfig,
     factory: Arc<PeerFactory>,
-    body: impl FnOnce(bool, MeetingInterface, SocketAddr) -> Result<(), Box<dyn Error>> + 'static,
+    body: impl Fn(bool, MeetingInterface, SocketAddr) -> Result<(), Box<dyn Error>> + 'static,
 ) -> Result<(), Box<dyn Error>> {
     let address = address.to_socket_addrs()?.next().unwrap();
     println!("* Starting server at {}", address);
+
+    let listener = TcpListener::bind(address)?;
+    let local_addr = listener.local_addr()?;
+    println!("* Server listening at: {}", local_addr);
 
     let TcpMeetingResult {
         meeting,
         interface,
         events_sender,
-    } = TcpMeeting::make(address, factory);
+    } = TcpMeeting::make(local_addr, meeting_config, factory);
     let (terminate_meeting_sender, terminate_meeting_receiver) = unbounded();
     let meeting_thread = meeting
         .run(Duration::ZERO, terminate_meeting_receiver)
         .unwrap();
 
-    let listener = TcpListener::bind(address)?;
-    let local_addr = listener.local_addr()?;
-    println!("* Server listening at: {}", local_addr);
     let (session_sender, session_receiver) = unbounded();
     let (terminate_host_sender, terminate_host_receiver) = unbounded();
-    let host_thread = TcpHost::new(listener)
+    let host_thread = TcpHost::new(listener, EngineId::uuid())
         .unwrap()
         .run(
             Duration::ZERO,
@@ -63,14 +69,20 @@ pub fn tcp_example_server(
             if terminate_session_receiver.try_recv().is_some() {
                 break;
             }
-            if let Some((local_addr, peer_addr, frames, terminate_session_sender)) =
-                session_receiver.try_recv()
+            if let Some(TcpHostSessionEvent {
+                local_addr,
+                peer_addr,
+                engine_id,
+                frames,
+                terminate_sender: terminate_session_sender,
+            }) = session_receiver.try_recv()
             {
                 println!("* Accepted connection from {}", peer_addr);
                 events_sender
                     .send(TcpMeetingEvent::RegisterSession {
                         local_addr,
                         peer_addr,
+                        engine_id,
                         frames,
                     })
                     .unwrap();
@@ -94,30 +106,38 @@ pub fn tcp_example_server(
 
 pub fn tcp_example_client(
     address: impl ToSocketAddrs,
+    meeting_config: TcpMeetingConfig,
     factory: Arc<PeerFactory>,
-    body: impl FnOnce(bool, MeetingInterface, SocketAddr) -> Result<(), Box<dyn Error>> + 'static,
+    body: impl Fn(bool, MeetingInterface, SocketAddr) -> Result<(), Box<dyn Error>> + 'static,
 ) -> Result<(), Box<dyn Error>> {
     let address = address.to_socket_addrs()?.next().unwrap();
     println!("* Connecting to server at {}", address);
+
+    let stream = TcpStream::connect(address)?;
+    let local_addr = stream.local_addr()?;
+    let remote_addr = stream.peer_addr()?;
+    println!("* Client connected at: {}", local_addr);
 
     let TcpMeetingResult {
         meeting,
         interface,
         events_sender,
-    } = TcpMeeting::make(address, factory);
+    } = TcpMeeting::make(
+        format!("{}<->{}", local_addr, remote_addr),
+        meeting_config,
+        factory,
+    );
     let (terminate_meeting_sender, terminate_meeting_receiver) = unbounded();
     let meeting_thread = meeting
         .run(Duration::ZERO, terminate_meeting_receiver)
         .unwrap();
 
-    let stream = TcpStream::connect(address)?;
-    let local_addr = stream.local_addr()?;
-    println!("* Client connected at: {}", local_addr);
-    let TcpSessionResult { session, frames } = TcpSession::make(stream).unwrap();
+    let TcpSessionResult { session, frames } = TcpSession::make(stream, EngineId::uuid()).unwrap();
     events_sender
         .send(TcpMeetingEvent::RegisterSession {
             local_addr: session.local_addr().unwrap(),
             peer_addr: session.peer_addr().unwrap(),
+            engine_id: session.remote_engine_id(),
             frames,
         })
         .unwrap();
