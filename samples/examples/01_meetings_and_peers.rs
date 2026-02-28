@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tcp_example(
         is_server,
         ADDRESS,
-        TcpMeetingConfig::enable_all(),
+        TcpMeetingConfig::default().enable_all_warnings(),
         factory.into(),
         app,
     )?;

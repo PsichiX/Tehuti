@@ -1,6 +1,6 @@
 [package]
 name = "tehuti"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
 description = "Modular communication system for game development."
@@ -30,3 +30,6 @@ typid = "1"
 seahash = "4"
 leb128 = "0.2"
 smallvec = { version = "1.15", features = ["serde"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+instant = { version = "0.1", features = ["wasm-bindgen"] }

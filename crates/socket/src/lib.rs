@@ -1,560 +1,75 @@
 use std::{
-    collections::{BTreeMap, HashMap, btree_map::Entry},
     error::Error,
     future::pending,
     io::{Cursor, ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    sync::Arc,
     thread::{Builder, JoinHandle, sleep},
     time::Duration,
     vec,
 };
 use tehuti::{
-    engine::{EngineId, EnginePeerDescriptor},
+    engine::{
+        EngineId, EngineMeeting, EngineMeetingConfig, EngineMeetingEvent, EngineMeetingResult,
+    },
     event::{Duplex, Receiver, Sender, unbounded},
-    meeting::{Meeting, MeetingEngineEvent, MeetingInterface, MeetingInterfaceResult},
-    peer::{PeerFactory, PeerId},
-    protocol::{ProtocolControlFrame, ProtocolFrame, ProtocolPacketFrame},
+    protocol::ProtocolFrame,
 };
 
-pub enum TcpMeetingEvent {
-    RegisterSession {
-        local_addr: SocketAddr,
-        peer_addr: SocketAddr,
-        engine_id: EngineId,
-        frames: Duplex<ProtocolFrame>,
-    },
-    UnregisterSession {
-        local_addr: SocketAddr,
-        peer_addr: SocketAddr,
-    },
+pub type TcpMeetingEvent = EngineMeetingEvent<TcpMeetingKey>;
+pub type TcpMeetingResult = EngineMeetingResult<TcpMeetingKey>;
+pub type TcpMeeting = EngineMeeting<TcpMeetingKey>;
+pub type TcpMeetingConfig = EngineMeetingConfig;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TcpMeetingKey {
+    pub local_addr: SocketAddr,
+    pub peer_addr: SocketAddr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TcpMeetingConfig {
-    pub warn_unhandled_control_frame: bool,
-    pub warn_duplicate_peer_creation: bool,
-    pub warn_unknown_peer_destruction: bool,
-    pub warn_unknown_peer_packet: bool,
-    pub warn_unknown_channel_packet: bool,
-    pub warn_unhandled_engine_event: bool,
-}
-
-impl TcpMeetingConfig {
-    pub fn disable_all() -> Self {
-        Self {
-            warn_unhandled_control_frame: false,
-            warn_duplicate_peer_creation: false,
-            warn_unknown_peer_destruction: false,
-            warn_unknown_peer_packet: false,
-            warn_unknown_channel_packet: false,
-            warn_unhandled_engine_event: false,
-        }
-    }
-
-    pub fn enable_all() -> Self {
-        Self {
-            warn_unhandled_control_frame: true,
-            warn_duplicate_peer_creation: true,
-            warn_unknown_peer_destruction: true,
-            warn_unknown_peer_packet: true,
-            warn_unknown_channel_packet: true,
-            warn_unhandled_engine_event: true,
-        }
-    }
-
-    pub fn warn_unhandled_control_frame(mut self, value: bool) -> Self {
-        self.warn_unhandled_control_frame = value;
-        self
-    }
-
-    pub fn warn_duplicate_peer_creation(mut self, value: bool) -> Self {
-        self.warn_duplicate_peer_creation = value;
-        self
-    }
-
-    pub fn warn_unknown_peer_destruction(mut self, value: bool) -> Self {
-        self.warn_unknown_peer_destruction = value;
-        self
-    }
-
-    pub fn warn_unknown_peer_packet(mut self, value: bool) -> Self {
-        self.warn_unknown_peer_packet = value;
-        self
-    }
-
-    pub fn warn_unknown_channel_packet(mut self, value: bool) -> Self {
-        self.warn_unknown_channel_packet = value;
-        self
-    }
-
-    pub fn warn_unhandled_engine_event(mut self, value: bool) -> Self {
-        self.warn_unhandled_engine_event = value;
-        self
+impl std::fmt::Display for TcpMeetingKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}<->{}", self.local_addr, self.peer_addr)
     }
 }
 
-pub struct TcpMeetingResult {
-    pub meeting: TcpMeeting,
-    pub interface: MeetingInterface,
-    pub events_sender: Sender<TcpMeetingEvent>,
+pub trait TcpMeetingExt {
+    fn run(
+        self,
+        interval: Duration,
+        terminate_receiver: Receiver<()>,
+    ) -> Result<JoinHandle<()>, Box<dyn Error>>;
 }
 
-pub struct TcpMeeting {
-    pub config: TcpMeetingConfig,
-    meeting: Meeting,
-    engine_event: Duplex<MeetingEngineEvent>,
-    peers: BTreeMap<PeerId, EnginePeerDescriptor>,
-    sessions: HashMap<(SocketAddr, SocketAddr), (Duplex<ProtocolFrame>, EngineId)>,
-    events_receiver: Receiver<TcpMeetingEvent>,
-}
-
-impl TcpMeeting {
-    pub fn make(
-        name: impl ToString,
-        config: TcpMeetingConfig,
-        factory: Arc<PeerFactory>,
-    ) -> TcpMeetingResult {
-        let MeetingInterfaceResult {
-            meeting,
-            interface,
-            engine_event,
-        } = MeetingInterface::make(factory, name);
-        let (events_sender, events_receiver) = unbounded();
-        TcpMeetingResult {
-            meeting: Self {
-                config,
-                meeting,
-                engine_event,
-                peers: Default::default(),
-                sessions: Default::default(),
-                events_receiver,
-            },
-            interface,
-            events_sender,
-        }
-    }
-
-    pub fn maintain(&mut self) -> Result<(), Box<dyn Error>> {
-        // Handle tcp meeting control events.
-        for event in self.events_receiver.iter() {
-            match event {
-                TcpMeetingEvent::RegisterSession {
-                    local_addr,
-                    peer_addr,
-                    engine_id,
-                    frames,
-                } => {
-                    tracing::event!(
-                        target: "tehuti::socket::session",
-                        tracing::Level::TRACE,
-                        "Meeting registering session: {:?}<->{:?}, engine ID: {:?}",
-                        local_addr,
-                        peer_addr,
-                        engine_id,
-                    );
-                    for descriptor in self.peers.values() {
-                        tracing::event!(
-                            target: "tehuti::socket::session",
-                            tracing::Level::TRACE,
-                            "Meeting session: {:?}<->{:?} register sending create peer {:?} with role {:?}",
-                            local_addr,
-                            peer_addr,
-                            descriptor.info.peer_id,
-                            descriptor.info.role_id,
-                        );
-                        let frame = ProtocolFrame::Control(ProtocolControlFrame::CreatePeer(
-                            descriptor.info.peer_id,
-                            descriptor.info.role_id,
-                        ));
-                        frames.sender.send(frame).map_err(|err| {
-                            format!(
-                                "Meeting session {:?}<->{:?} frame sender error: {}",
-                                local_addr, peer_addr, err
-                            )
-                        })?;
-                    }
-                    self.sessions
-                        .insert((local_addr, peer_addr), (frames, engine_id));
-                }
-                TcpMeetingEvent::UnregisterSession {
-                    local_addr,
-                    peer_addr,
-                } => {
-                    tracing::event!(
-                        target: "tehuti::socket::session",
-                        tracing::Level::TRACE,
-                        "Meeting unregistering session: {:?}<->{:?}",
-                        local_addr,
-                        peer_addr,
-                    );
-                    self.sessions.remove(&(local_addr, peer_addr));
-                }
-            }
-        }
-
-        // Process receiving frames from all sessions.
-        for ((local_addr, peer_addr), (frames, _)) in &self.sessions {
-            for frame in frames.receiver.iter() {
-                match frame {
-                    ProtocolFrame::Control(frame) => {
-                        for ((local_addr2, peer_addr2), (frames2, _)) in &self.sessions {
-                            if peer_addr != peer_addr2 {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::TRACE,
-                                    "Meeting session {:?}<->{:?} forwarding control frame to {:?}<->{:?}: {:?}",
-                                    local_addr,
-                                    peer_addr,
-                                    local_addr2,
-                                    peer_addr2,
-                                    frame,
-                                );
-                                frames2
-                                    .sender
-                                    .send(ProtocolFrame::Control(frame.clone()))
-                                    .map_err(|err| {
-                                        format!(
-                                            "Meeting session {:?}<->{:?} frame sender error: {err}",
-                                            local_addr2, peer_addr2
-                                        )
-                                    })?;
-                            }
-                        }
-
-                        match frame {
-                            ProtocolControlFrame::CreatePeer(peer_id, peer_role_id) => {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::TRACE,
-                                    "Meeting session {:?}<->{:?} got create peer {:?} with role {:?}",
-                                    local_addr,
-                                    peer_addr,
-                                    peer_id,
-                                    peer_role_id,
-                                );
-                                self.engine_event
-                                    .sender
-                                    .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
-                                    .map_err(|err| {
-                                        format!(
-                                            "Meeting session {:?}<->{:?} outside engine sender error: {err}",
-                                            local_addr,
-                                            peer_addr
-                                        )
-                                    })
-                                    .unwrap();
-                            }
-                            ProtocolControlFrame::DestroyPeer(peer_id) => {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::TRACE,
-                                    "Meeting session {:?}<->{:?} got destroy peer {:?}",
-                                    local_addr,
-                                    peer_addr,
-                                    peer_id,
-                                );
-                                self.engine_event
-                                    .sender
-                                    .send(MeetingEngineEvent::PeerLeft(peer_id))
-                                    .map_err(|err| {
-                                        format!(
-                                            "Meeting session {:?}<->{:?} outside engine sender error: {err}",
-                                            local_addr,
-                                            peer_addr
-                                        )
-                                    })
-                                    .unwrap();
-                            }
-                            _ => {
-                                if self.config.warn_unhandled_control_frame {
-                                    tracing::event!(
-                                        target: "tehuti::socket::session",
-                                        tracing::Level::WARN,
-                                        "Meeting session {:?}<->{:?} got unhandled control frame: {:?}",
-                                        local_addr,
-                                        peer_addr,
-                                        frame,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                    ProtocolFrame::Packet(frame) => {
-                        for ((local_addr2, peer_addr2), (frames2, engine_id2)) in &self.sessions {
-                            if !frame.data.recepients.is_empty()
-                                && !frame.data.recepients.contains(engine_id2)
-                            {
-                                continue;
-                            }
-                            if peer_addr != peer_addr2 {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::TRACE,
-                                    "Meeting session {:?}<->{:?} forwarding packet frame for peer {:?} channel {:?} to {:?}<->{:?}. {} bytes",
-                                    local_addr,
-                                    peer_addr,
-                                    frame.peer_id,
-                                    frame.channel_id,
-                                    local_addr2,
-                                    peer_addr2,
-                                    frame.data.data.len(),
-                                );
-                                frames2
-                                    .sender
-                                    .send(ProtocolFrame::Packet(frame.clone()))
-                                    .map_err(|err| {
-                                        format!(
-                                            "Meeting session {:?}<->{:?} frame sender error: {err}",
-                                            local_addr2, peer_addr2
-                                        )
-                                    })?;
-                            }
-                        }
-
-                        if let Some(peer) = self.peers.get(&frame.peer_id) {
-                            if let Some(sender) = peer.packet_senders.get(&frame.channel_id) {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::TRACE,
-                                    "Meeting session {:?}<->{:?} got packet frame for peer {:?} channel {:?}: {} bytes",
-                                    local_addr,
-                                    peer_addr,
-                                    frame.peer_id,
-                                    frame.channel_id,
-                                    frame.data.data.len(),
-                                );
-                                sender
-                                    .sender
-                                    .send(frame.data)
-                                    .map_err(|err| {
-                                        format!(
-                                            "Meeting session {:?}<->{:?} packet sender error: {err}",
-                                            local_addr,
-                                            peer_addr
-                                        )
-                                    })
-                                    .unwrap();
-                            } else if self.config.warn_unknown_channel_packet {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::WARN,
-                                    "Meeting session {:?}<->{:?} got packet frame for unknown channel {:?} of peer {:?}",
-                                    local_addr,
-                                    peer_addr,
-                                    frame.channel_id,
-                                    frame.peer_id,
-                                );
-                            }
-                        } else if self.config.warn_unknown_peer_packet {
-                            tracing::event!(
-                                target: "tehuti::socket::session",
-                                tracing::Level::WARN,
-                                "Meeting session {:?}<->{:?} got packet frame for unknown peer {:?}",
-                                local_addr,
-                                peer_addr,
-                                frame.peer_id,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Handle sending packets from peers to all sessions.
-        for peer in self.peers.values() {
-            for (channel_id, receiver) in &peer.packet_receivers {
-                for data in receiver.receiver.iter() {
-                    let size = data.data.len();
-                    let recepients = data.recepients.to_owned();
-                    let frame = ProtocolFrame::Packet(ProtocolPacketFrame {
-                        peer_id: peer.info.peer_id,
-                        channel_id: *channel_id,
-                        data,
-                    });
-                    for ((local_addr, peer_addr), (frames, engine_id)) in &self.sessions {
-                        if !recepients.is_empty() && !recepients.contains(engine_id) {
-                            continue;
-                        }
-                        tracing::event!(
-                            target: "tehuti::socket::session",
-                            tracing::Level::TRACE,
-                            "Meeting session {:?}<->{:?} sending packet frame for peer {:?} channel {:?}. {} bytes",
-                            local_addr,
-                            peer_addr,
-                            peer.info.peer_id,
-                            channel_id,
-                            size,
-                        );
-                        frames.sender.send(frame.clone()).map_err(|err| {
-                            format!(
-                                "Meeting session {:?}<->{:?} frame sender error: {}",
-                                local_addr, peer_addr, err
-                            )
-                        })?;
-                    }
-                }
-            }
-        }
-
-        // Handle meeting pump.
-        if let Err(err) = self.meeting.pump_all() {
-            tracing::event!(
-                target: "tehuti::socket::session",
-                tracing::Level::ERROR,
-                "Meeting encountered error: {}. Terminating",
-                err,
-            );
-            return Err(err);
-        }
-
-        // Handle meeting engine events.
-        for event in self.engine_event.receiver.iter() {
-            match event {
-                MeetingEngineEvent::MeetingDestroyed => {
-                    tracing::event!(
-                        target: "tehuti::socket::session",
-                        tracing::Level::TRACE,
-                        "Meeting got destroyed. Terminating",
-                    );
-                    return Err("Meeting destroyed".into());
-                }
-                MeetingEngineEvent::PeerCreated(descriptor) => {
-                    if let Entry::Vacant(entry) = self.peers.entry(descriptor.info.peer_id) {
-                        tracing::event!(
-                            target: "tehuti::socket::session",
-                            tracing::Level::TRACE,
-                            "Meeting created peer {:?}",
-                            descriptor.info.peer_id,
-                        );
-                        if !descriptor.info.remote {
-                            let frame = ProtocolFrame::Control(ProtocolControlFrame::CreatePeer(
-                                descriptor.info.peer_id,
-                                descriptor.info.role_id,
-                            ));
-                            for ((local_addr, peer_addr), (frames, _)) in &self.sessions {
-                                tracing::event!(
-                                    target: "tehuti::socket::session",
-                                    tracing::Level::TRACE,
-                                    "Meeting session {:?}<->{:?} sending create peer {:?} with role {:?}",
-                                    local_addr,
-                                    peer_addr,
-                                    descriptor.info.peer_id,
-                                    descriptor.info.role_id,
-                                );
-                                frames.sender.send(frame.clone()).map_err(|err| {
-                                    format!(
-                                        "Meeting session {:?}<->{:?} frame sender error: {}",
-                                        local_addr, peer_addr, err
-                                    )
-                                })?;
-                            }
-                        }
-                        entry.insert(descriptor);
-                    } else if self.config.warn_duplicate_peer_creation {
-                        tracing::event!(
-                            target: "tehuti::socket::session",
-                            tracing::Level::WARN,
-                            "Meeting tries to create duplicate peer {:?} created",
-                            descriptor.info.peer_id,
-                        );
-                    }
-                }
-                MeetingEngineEvent::PeerDestroyed(peer_id) => {
-                    if self.peers.contains_key(&peer_id) {
-                        tracing::event!(
-                            target: "tehuti::socket::session",
-                            tracing::Level::TRACE,
-                            "Meeting destroyed peer {:?}",
-                            peer_id,
-                        );
-                        let frame =
-                            ProtocolFrame::Control(ProtocolControlFrame::DestroyPeer(peer_id));
-                        for ((local_addr, peer_addr), (frames, _)) in &self.sessions {
-                            tracing::event!(
-                                target: "tehuti::socket::session",
-                                tracing::Level::TRACE,
-                                "Meeting session {:?}<->{:?} sending destroy peer {:?}",
-                                local_addr,
-                                peer_addr,
-                                peer_id,
-                            );
-                            frames.sender.send(frame.clone()).map_err(|err| {
-                                format!(
-                                    "Meeting session {:?}<->{:?} frame sender error: {}",
-                                    local_addr, peer_addr, err
-                                )
-                            })?;
-                        }
-                        self.peers.remove(&peer_id);
-                    } else if self.config.warn_unknown_peer_destruction {
-                        tracing::event!(
-                            target: "tehuti::socket::session",
-                            tracing::Level::WARN,
-                            "Meeting tries to destroy unknown peer {:?} destroyed",
-                            peer_id,
-                        );
-                    }
-                }
-                event => {
-                    if self.config.warn_unhandled_engine_event {
-                        tracing::event!(
-                            target: "tehuti::socket::session",
-                            tracing::Level::WARN,
-                            "Meeting got unhandled engine event: {:?}",
-                            event,
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn run(
+impl TcpMeetingExt for EngineMeeting<TcpMeetingKey> {
+    fn run(
         mut self,
         interval: Duration,
         terminate_receiver: Receiver<()>,
     ) -> Result<JoinHandle<()>, Box<dyn Error>> {
-        Ok(Builder::new().name("Meeting".to_string()).spawn(move || {
-            loop {
-                if terminate_receiver.try_recv().is_some() {
-                    tracing::event!(
-                        target: "tehuti::socket::meeting",
-                        tracing::Level::TRACE,
-                        "Meeting terminating on request",
-                    );
-                    break;
+        Ok(Builder::new()
+            .name("TcpMeeting".to_string())
+            .spawn(move || {
+                loop {
+                    if terminate_receiver.try_recv().is_some() {
+                        tracing::event!(
+                            target: "tehuti::socket::meeting",
+                            tracing::Level::TRACE,
+                            "Meeting terminating on request",
+                        );
+                        break;
+                    }
+                    if let Err(err) = self.maintain() {
+                        tracing::event!(
+                            target: "tehuti::socket::meeting",
+                            tracing::Level::ERROR,
+                            "Meeting terminated with error: {}",
+                            err,
+                        );
+                        return;
+                    }
+                    sleep(interval);
                 }
-                if let Err(err) = self.maintain() {
-                    tracing::event!(
-                        target: "tehuti::socket::meeting",
-                        tracing::Level::ERROR,
-                        "Meeting terminated with error: {}",
-                        err,
-                    );
-                    return;
-                }
-                sleep(interval);
-            }
-        })?)
-    }
-
-    pub async fn into_future(mut self) -> Result<(), Box<dyn Error>> {
-        loop {
-            if let Err(err) = self.maintain() {
-                tracing::event!(
-                    target: "tehuti::socket::meeting",
-                    tracing::Level::ERROR,
-                    "Meeting terminated with error: {}",
-                    err,
-                );
-                break;
-            }
-            pending::<()>().await;
-        }
-        Ok(())
+            })?)
     }
 }
 
@@ -942,12 +457,15 @@ impl TcpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::spawn;
+    use std::{sync::Arc, thread::spawn};
     use tehuti::{
         channel::{ChannelId, ChannelMode, Dispatch},
         codec::replicable::RepCodec,
         meeting::MeetingUserEvent,
-        peer::{PeerBuilder, PeerDestructurer, PeerRoleId, TypedPeer, TypedPeerRole},
+        peer::{
+            PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer,
+            TypedPeerRole,
+        },
     };
     use tehuti_mock::{mock_env_tracing, mock_recv_matching};
     use tracing::level_filters::LevelFilter;
@@ -987,7 +505,11 @@ mod tests {
                 meeting,
                 interface,
                 events_sender,
-            } = TcpMeeting::make("Server", TcpMeetingConfig::enable_all(), factory);
+            } = TcpMeeting::make(
+                "Server",
+                TcpMeetingConfig::default().enable_all_warnings(),
+                factory,
+            );
             let (terminate_meeting_sender, terminate_meeting_receiver) = unbounded();
             let meeting_thread = meeting
                 .run(Duration::ZERO, terminate_meeting_receiver)
@@ -1017,9 +539,11 @@ mod tests {
             } = session_receiver.recv_blocking().unwrap();
             println!("* Server accepted connection from {:?}", peer_addr);
             events_sender
-                .send(TcpMeetingEvent::RegisterSession {
-                    local_addr,
-                    peer_addr,
+                .send(TcpMeetingEvent::RegisterEngine {
+                    key: TcpMeetingKey {
+                        local_addr,
+                        peer_addr,
+                    },
                     engine_id,
                     frames,
                 })
@@ -1071,7 +595,11 @@ mod tests {
                 meeting,
                 interface,
                 events_sender,
-            } = TcpMeeting::make("Client", TcpMeetingConfig::enable_all(), factory);
+            } = TcpMeeting::make(
+                "Client",
+                TcpMeetingConfig::default().enable_all_warnings(),
+                factory,
+            );
             let (terminate_meeting_sender, terminate_meeting_receiver) = unbounded();
             let meeting_thread = meeting
                 .run(Duration::ZERO, terminate_meeting_receiver)
@@ -1088,9 +616,11 @@ mod tests {
             let TcpSessionResult { session, frames } =
                 TcpSession::make(stream, session_engine_id).unwrap();
             events_sender
-                .send(TcpMeetingEvent::RegisterSession {
-                    local_addr: session.local_addr().unwrap(),
-                    peer_addr: session.peer_addr().unwrap(),
+                .send(TcpMeetingEvent::RegisterEngine {
+                    key: TcpMeetingKey {
+                        local_addr: session.local_addr().unwrap(),
+                        peer_addr: session.peer_addr().unwrap(),
+                    },
                     engine_id: session_engine_id,
                     frames,
                 })

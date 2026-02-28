@@ -4,7 +4,6 @@ use std::{
     ops::Range,
     sync::Arc,
     thread::JoinHandle,
-    time::{Duration, Instant},
 };
 use tehuti::{
     engine::{EngineId, EnginePeerDescriptor},
@@ -13,6 +12,7 @@ use tehuti::{
     meeting::{MeetingEngineEvent, MeetingInterface, MeetingInterfaceResult},
     peer::{PeerFactory, PeerId},
     protocol::{ProtocolControlFrame, ProtocolFrame, ProtocolPacketFrame},
+    third_party::time::{Duration, Instant},
 };
 use tracing::level_filters::LevelFilter;
 

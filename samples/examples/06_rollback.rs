@@ -2,13 +2,7 @@ use crossterm::{event::KeyCode, terminal::size};
 use rand::random_range;
 use samples::{tcp::tcp_example, terminal::Terminal, utils::Keys};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    error::Error,
-    fmt::Write,
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, error::Error, fmt::Write, net::SocketAddr};
 use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
     codec::postcard::PostcardCodec,
@@ -18,7 +12,10 @@ use tehuti::{
         Peer, PeerBuilder, PeerDestructurer, PeerId, PeerInfo, PeerRoleId, TypedPeer, TypedPeerRole,
     },
     replication::primitives::RepF32,
-    third_party::tracing::debug,
+    third_party::{
+        time::{Duration, Instant},
+        tracing::debug,
+    },
 };
 use tehuti_client_server::authority::{Authority, AuthorityUserData};
 use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
@@ -70,7 +67,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     tcp_example(
         is_server,
         ADDRESS,
-        TcpMeetingConfig::enable_all().warn_unknown_channel_packet(false),
+        TcpMeetingConfig::default()
+            .enable_all_warnings()
+            .warn_unknown_channel_packet(false),
         factory.into(),
         app,
     )?;

@@ -49,6 +49,13 @@ pub mod third_party {
     pub use seahash;
     pub use tracing;
     pub use typid;
+
+    pub mod time {
+        #[cfg(target_arch = "wasm32")]
+        pub use instant::{Duration, Instant};
+        #[cfg(not(target_arch = "wasm32"))]
+        pub use std::time::{Duration, Instant};
+    }
 }
 
 pub fn hash<T: std::hash::Hash>(data: &T) -> u64 {

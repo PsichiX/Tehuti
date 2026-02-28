@@ -1,6 +1,6 @@
 use crate::time::TimeStamp;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use tehuti::third_party::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClockEvent {

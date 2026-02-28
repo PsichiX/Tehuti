@@ -2,13 +2,7 @@ use crossterm::{event::KeyCode, terminal::size};
 use rand::{RngExt, SeedableRng, rngs::ChaCha8Rng};
 use samples::{tcp::tcp_example, terminal::Terminal, utils::Keys};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    error::Error,
-    fmt::Write,
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, error::Error, fmt::Write, net::SocketAddr};
 use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
     codec::postcard::PostcardCodec,
@@ -19,7 +13,11 @@ use tehuti::{
         PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerInfo, PeerRoleId, TypedPeer,
         TypedPeerRole,
     },
-    third_party::{rust_decimal::Decimal, tracing::debug},
+    third_party::{
+        rust_decimal::Decimal,
+        time::{Duration, Instant},
+        tracing::debug,
+    },
 };
 use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
 use tehuti_socket::TcpMeetingConfig;
@@ -62,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tcp_example(
         is_server,
         ADDRESS,
-        TcpMeetingConfig::enable_all(),
+        TcpMeetingConfig::default().enable_all_warnings(),
         factory.into(),
         app,
     )?;

@@ -9,8 +9,8 @@ use std::{
 };
 use tehuti::{engine::EngineId, event::unbounded, meeting::MeetingInterface, peer::PeerFactory};
 use tehuti_socket::{
-    TcpHost, TcpHostSessionEvent, TcpMeeting, TcpMeetingConfig, TcpMeetingEvent, TcpMeetingResult,
-    TcpSession, TcpSessionResult,
+    TcpHost, TcpHostSessionEvent, TcpMeeting, TcpMeetingConfig, TcpMeetingEvent, TcpMeetingExt,
+    TcpMeetingKey, TcpMeetingResult, TcpSession, TcpSessionResult,
 };
 
 pub fn tcp_example(
@@ -79,9 +79,11 @@ pub fn tcp_example_server(
             {
                 println!("* Accepted connection from {}", peer_addr);
                 events_sender
-                    .send(TcpMeetingEvent::RegisterSession {
-                        local_addr,
-                        peer_addr,
+                    .send(TcpMeetingEvent::RegisterEngine {
+                        key: TcpMeetingKey {
+                            local_addr,
+                            peer_addr,
+                        },
                         engine_id,
                         frames,
                     })
@@ -134,9 +136,11 @@ pub fn tcp_example_client(
 
     let TcpSessionResult { session, frames } = TcpSession::make(stream, EngineId::uuid()).unwrap();
     events_sender
-        .send(TcpMeetingEvent::RegisterSession {
-            local_addr: session.local_addr().unwrap(),
-            peer_addr: session.peer_addr().unwrap(),
+        .send(TcpMeetingEvent::RegisterEngine {
+            key: TcpMeetingKey {
+                local_addr: session.local_addr().unwrap(),
+                peer_addr: session.peer_addr().unwrap(),
+            },
             engine_id: session.remote_engine_id(),
             frames,
         })

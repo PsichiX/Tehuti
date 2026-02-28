@@ -1,10 +1,5 @@
 use samples::tcp::tcp_example;
-use std::{
-    error::Error,
-    net::SocketAddr,
-    thread::sleep,
-    time::{Duration, Instant},
-};
+use std::{error::Error, net::SocketAddr, thread::sleep};
 use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
     codec::replicable::RepCodec,
@@ -15,6 +10,7 @@ use tehuti::{
     },
     replica::{Replica, ReplicaId, ReplicaSet, ReplicationBuffer},
     replication::rpc::Rpc,
+    third_party::time::{Duration, Instant},
 };
 use tehuti_mock::mock_recv_matching;
 use tehuti_socket::TcpMeetingConfig;
@@ -40,7 +36,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     tcp_example(
         is_server,
         ADDRESS,
-        TcpMeetingConfig::enable_all(),
+        TcpMeetingConfig::default().enable_all_warnings(),
         factory.into(),
         app,
     )?;

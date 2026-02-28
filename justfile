@@ -8,6 +8,12 @@ build:
   cargo build --all --all-features
   cargo build --examples --all --all-features
 
+build-wasm:
+  cargo build --target wasm32-unknown-unknown --manifest-path ./crates/_/Cargo.toml
+  cargo build --target wasm32-unknown-unknown --manifest-path ./crates/diagnostics/Cargo.toml
+  cargo build --target wasm32-unknown-unknown --manifest-path ./crates/client-server/Cargo.toml
+  cargo build --target wasm32-unknown-unknown --manifest-path ./crates/timeline/Cargo.toml
+
 test:
   cargo test --all --all-features -- --nocapture
 
@@ -21,6 +27,7 @@ clippy:
 checks:
   just format
   just build
+  just build-wasm
   just clippy
   just test
   just miri
