@@ -15,22 +15,10 @@ use tehuti::{
     protocol::ProtocolFrame,
 };
 
-pub type TcpMeetingEvent = EngineMeetingEvent<TcpMeetingKey>;
-pub type TcpMeetingResult = EngineMeetingResult<TcpMeetingKey>;
-pub type TcpMeeting = EngineMeeting<TcpMeetingKey>;
+pub type TcpMeetingEvent = EngineMeetingEvent;
+pub type TcpMeetingResult = EngineMeetingResult;
+pub type TcpMeeting = EngineMeeting;
 pub type TcpMeetingConfig = EngineMeetingConfig;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TcpMeetingKey {
-    pub local_addr: SocketAddr,
-    pub peer_addr: SocketAddr,
-}
-
-impl std::fmt::Display for TcpMeetingKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}<->{}", self.local_addr, self.peer_addr)
-    }
-}
 
 pub trait TcpMeetingExt {
     fn run(
@@ -40,7 +28,7 @@ pub trait TcpMeetingExt {
     ) -> Result<JoinHandle<()>, Box<dyn Error>>;
 }
 
-impl TcpMeetingExt for EngineMeeting<TcpMeetingKey> {
+impl TcpMeetingExt for EngineMeeting {
     fn run(
         mut self,
         interval: Duration,
@@ -531,22 +519,15 @@ mod tests {
                 .unwrap();
 
             let TcpHostSessionEvent {
-                local_addr,
                 peer_addr,
                 engine_id,
                 frames,
                 terminate_sender: terminate_session_sender,
+                ..
             } = session_receiver.recv_blocking().unwrap();
             println!("* Server accepted connection from {:?}", peer_addr);
             events_sender
-                .send(TcpMeetingEvent::RegisterEngine {
-                    key: TcpMeetingKey {
-                        local_addr,
-                        peer_addr,
-                    },
-                    engine_id,
-                    frames,
-                })
+                .send(TcpMeetingEvent::RegisterEngine { engine_id, frames })
                 .unwrap();
 
             println!("* Server creating peer...");
@@ -617,10 +598,6 @@ mod tests {
                 TcpSession::make(stream, session_engine_id).unwrap();
             events_sender
                 .send(TcpMeetingEvent::RegisterEngine {
-                    key: TcpMeetingKey {
-                        local_addr: session.local_addr().unwrap(),
-                        peer_addr: session.peer_addr().unwrap(),
-                    },
                     engine_id: session_engine_id,
                     frames,
                 })

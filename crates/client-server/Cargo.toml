@@ -1,6 +1,6 @@
 [package]
 name = "tehuti-client-server"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 authors = ["Patryk 'PsichiX' Budzynski <psichix@gmail.com>"]
 description = "Client-server framework for Tehuti communication system."
@@ -11,6 +11,6 @@ documentation = "https://docs.rs/tehuti-client-server"
 readme = "../../README.md"
 
 [dependencies]
-tehuti = { version = "0.17", path = "../_" }
+tehuti = { version = "0.18", path = "../_" }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }

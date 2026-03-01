@@ -70,14 +70,13 @@ pub struct EnginePeerDescriptor {
     pub packet_receivers: BTreeMap<ChannelId, EnginePacketReceiver>,
 }
 
-pub enum EngineMeetingEvent<Key: std::fmt::Display + Ord> {
+pub enum EngineMeetingEvent {
     RegisterEngine {
-        key: Key,
         engine_id: EngineId,
         frames: Duplex<ProtocolFrame>,
     },
     UnregisterEngine {
-        key: Key,
+        engine_id: EngineId,
     },
 }
 
@@ -143,27 +142,27 @@ impl EngineMeetingConfig {
     }
 }
 
-pub struct EngineMeetingResult<Key: std::fmt::Display + Ord> {
-    pub meeting: EngineMeeting<Key>,
+pub struct EngineMeetingResult {
+    pub meeting: EngineMeeting,
     pub interface: MeetingInterface,
-    pub events_sender: Sender<EngineMeetingEvent<Key>>,
+    pub events_sender: Sender<EngineMeetingEvent>,
 }
 
-pub struct EngineMeeting<Key: std::fmt::Display + Ord> {
+pub struct EngineMeeting {
     pub config: EngineMeetingConfig,
     meeting: Meeting,
     engine_event: Duplex<MeetingEngineEvent>,
     peers: BTreeMap<PeerId, EnginePeerDescriptor>,
-    engines: BTreeMap<Key, (Duplex<ProtocolFrame>, EngineId)>,
-    events_receiver: Receiver<EngineMeetingEvent<Key>>,
+    engines: BTreeMap<EngineId, Duplex<ProtocolFrame>>,
+    events_receiver: Receiver<EngineMeetingEvent>,
 }
 
-impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
+impl EngineMeeting {
     pub fn make(
         name: impl ToString,
         config: EngineMeetingConfig,
         factory: Arc<PeerFactory>,
-    ) -> EngineMeetingResult<Key> {
+    ) -> EngineMeetingResult {
         let MeetingInterfaceResult {
             meeting,
             interface,
@@ -188,24 +187,19 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
         // Handle engine meeting control events.
         for event in self.events_receiver.iter() {
             match event {
-                EngineMeetingEvent::RegisterEngine {
-                    key,
-                    engine_id,
-                    frames,
-                } => {
+                EngineMeetingEvent::RegisterEngine { engine_id, frames } => {
                     tracing::event!(
                         target: "tehuti::engine::meeting",
                         tracing::Level::TRACE,
-                        "Meeting registering engine: {}, engine ID: {:?}",
-                        key,
+                        "Meeting registering engine: {:?}",
                         engine_id,
                     );
                     for descriptor in self.peers.values() {
                         tracing::event!(
                             target: "tehuti::engine::meeting",
                             tracing::Level::TRACE,
-                            "Meeting engine: {} register sending create peer {} with role {}",
-                            key,
+                            "Meeting engine: {:?} register sending create peer {:?} with role {:?}",
+                            engine_id,
                             descriptor.info.peer_id,
                             descriptor.info.role_id,
                         );
@@ -214,36 +208,36 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                             descriptor.info.role_id,
                         ));
                         frames.sender.send(frame).map_err(|err| {
-                            format!("Meeting engine {} frame sender error: {}", key, err)
+                            format!("Meeting engine {:?} frame sender error: {}", engine_id, err)
                         })?;
                     }
-                    self.engines.insert(key, (frames, engine_id));
+                    self.engines.insert(engine_id, frames);
                 }
-                EngineMeetingEvent::UnregisterEngine { key } => {
+                EngineMeetingEvent::UnregisterEngine { engine_id } => {
                     tracing::event!(
                         target: "tehuti::engine::meeting",
                         tracing::Level::TRACE,
-                        "Meeting unregistering engine: {}",
-                        key,
+                        "Meeting unregistering engine: {:?}",
+                        engine_id,
                     );
-                    self.engines.remove(&key);
+                    self.engines.remove(&engine_id);
                 }
             }
         }
 
         // Process receiving frames from all engines.
-        for (key, (frames, _)) in &self.engines {
+        for (engine_id, frames) in &self.engines {
             for frame in frames.receiver.iter() {
                 match frame {
                     ProtocolFrame::Control(frame) => {
-                        for (key2, (frames2, _)) in &self.engines {
-                            if key != key2 {
+                        for (engine_id2, frames2) in &self.engines {
+                            if engine_id != engine_id2 {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::TRACE,
-                                    "Meeting engine {} forwarding control frame to {}: {:?}",
-                                    key,
-                                    key2,
+                                    "Meeting engine {:?} forwarding control frame to {:?}: {:?}",
+                                    engine_id,
+                                    engine_id2,
                                     frame,
                                 );
                                 frames2
@@ -251,8 +245,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                     .send(ProtocolFrame::Control(frame.clone()))
                                     .map_err(|err| {
                                         format!(
-                                            "Meeting engine {} frame sender error: {}",
-                                            key, err
+                                            "Meeting engine {:?} frame sender error: {:?}",
+                                            engine_id, err
                                         )
                                     })?;
                             }
@@ -263,8 +257,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::TRACE,
-                                    "Meeting engine {} got create peer {:?} with role {:?}",
-                                    key,
+                                    "Meeting engine {:?} got create peer {:?} with role {:?}",
+                                    engine_id,
                                     peer_id,
                                     peer_role_id,
                                 );
@@ -273,8 +267,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                     .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
                                     .map_err(|err| {
                                         format!(
-                                            "Meeting engine {} outside engine sender error: {err}",
-                                            key
+                                            "Meeting engine {:?} outside engine sender error: {:?}",
+                                            engine_id, err
                                         )
                                     })
                                     .unwrap();
@@ -283,8 +277,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::TRACE,
-                                    "Meeting engine {} got destroy peer {:?}",
-                                    key,
+                                    "Meeting engine {:?} got destroy peer {:?}",
+                                    engine_id,
                                     peer_id,
                                 );
                                 self.engine_event
@@ -292,8 +286,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                     .send(MeetingEngineEvent::PeerLeft(peer_id))
                                     .map_err(|err| {
                                         format!(
-                                            "Meeting engine {} outside engine sender error: {err}",
-                                            key
+                                            "Meeting engine {:?} outside engine sender error: {:?}",
+                                            engine_id, err
                                         )
                                     })
                                     .unwrap();
@@ -303,8 +297,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                     tracing::event!(
                                         target: "tehuti::engine::meeting",
                                         tracing::Level::WARN,
-                                        "Meeting engine {} got unhandled control frame: {:?}",
-                                        key,
+                                        "Meeting engine {:?} got unhandled control frame: {:?}",
+                                        engine_id,
                                         frame,
                                     );
                                 }
@@ -312,28 +306,31 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                         }
                     }
                     ProtocolFrame::Packet(frame) => {
-                        for (key2, (frames2, engine_id2)) in &self.engines {
+                        for (engine_id2, frames2) in &self.engines {
                             if !frame.data.recepients.is_empty()
                                 && !frame.data.recepients.contains(engine_id2)
                             {
                                 continue;
                             }
-                            if key != key2 {
+                            if engine_id != engine_id2 {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::TRACE,
-                                    "Meeting engine {} forwarding packet frame for peer {:?} channel {:?} to {}. {} bytes",
-                                    key,
+                                    "Meeting engine {:?} forwarding packet frame for peer {:?} channel {:?} to {:?}. {} bytes",
+                                    engine_id,
                                     frame.peer_id,
                                     frame.channel_id,
-                                    key2,
+                                    engine_id2,
                                     frame.data.data.len(),
                                 );
                                 frames2
                                     .sender
                                     .send(ProtocolFrame::Packet(frame.clone()))
                                     .map_err(|err| {
-                                        format!("Meeting engine {} frame sender error: {err}", key2)
+                                        format!(
+                                            "Meeting engine {:?} frame sender error: {:?}",
+                                            engine_id2, err
+                                        )
                                     })?;
                             }
                         }
@@ -343,8 +340,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::TRACE,
-                                    "Meeting engine {} got packet frame for peer {:?} channel {:?}: {} bytes",
-                                    key,
+                                    "Meeting engine {:?} got packet frame for peer {:?} channel {:?}: {} bytes",
+                                    engine_id,
                                     frame.peer_id,
                                     frame.channel_id,
                                     frame.data.data.len(),
@@ -353,15 +350,18 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                     .sender
                                     .send(frame.data)
                                     .map_err(|err| {
-                                        format!("Meeting engine {} packet sender error: {err}", key)
+                                        format!(
+                                            "Meeting engine {:?} packet sender error: {:?}",
+                                            engine_id, err
+                                        )
                                     })
                                     .unwrap();
                             } else if self.config.warn_unknown_channel_packet {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::WARN,
-                                    "Meeting engine {} got packet frame for unknown channel {:?} of peer {:?}",
-                                    key,
+                                    "Meeting engine {:?} got packet frame for unknown channel {:?} of peer {:?}",
+                                    engine_id,
                                     frame.channel_id,
                                     frame.peer_id,
                                 );
@@ -370,8 +370,8 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                             tracing::event!(
                                 target: "tehuti::engine::meeting",
                                 tracing::Level::WARN,
-                                "Meeting engine {} got packet frame for unknown peer {:?}",
-                                key,
+                                "Meeting engine {:?} got packet frame for unknown peer {:?}",
+                                engine_id,
                                 frame.peer_id,
                             );
                         }
@@ -391,21 +391,24 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                         channel_id: *channel_id,
                         data,
                     });
-                    for (key, (frames, engine_id)) in &self.engines {
+                    for (engine_id, frames) in &self.engines {
                         if !recepients.is_empty() && !recepients.contains(engine_id) {
                             continue;
                         }
                         tracing::event!(
                             target: "tehuti::engine::meeting",
                             tracing::Level::TRACE,
-                            "Meeting engine {} sending packet frame for peer {:?} channel {:?}. {} bytes",
-                            key,
+                            "Meeting engine {:?} sending packet frame for peer {:?} channel {:?}. {} bytes",
+                            engine_id,
                             peer.info.peer_id,
                             channel_id,
                             size,
                         );
                         frames.sender.send(frame.clone()).map_err(|err| {
-                            format!("Meeting engine {} frame sender error: {}", key, err)
+                            format!(
+                                "Meeting engine {:?} frame sender error: {:?}",
+                                engine_id, err
+                            )
                         })?;
                     }
                 }
@@ -447,17 +450,20 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                                 descriptor.info.peer_id,
                                 descriptor.info.role_id,
                             ));
-                            for (key, (frames, _)) in &self.engines {
+                            for (engine_id, frames) in &self.engines {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::TRACE,
-                                    "Meeting engine {} sending create peer {:?} with role {:?}",
-                                    key,
+                                    "Meeting engine {:?} sending create peer {:?} with role {:?}",
+                                    engine_id,
                                     descriptor.info.peer_id,
                                     descriptor.info.role_id,
                                 );
                                 frames.sender.send(frame.clone()).map_err(|err| {
-                                    format!("Meeting engine {} frame sender error: {}", key, err)
+                                    format!(
+                                        "Meeting engine {:?} frame sender error: {:?}",
+                                        engine_id, err
+                                    )
                                 })?;
                             }
                         }
@@ -481,16 +487,19 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
                         );
                         let frame =
                             ProtocolFrame::Control(ProtocolControlFrame::DestroyPeer(peer_id));
-                        for (key, (frames, _)) in &self.engines {
+                        for (engine_id, frames) in &self.engines {
                             tracing::event!(
                                 target: "tehuti::engine::meeting",
                                 tracing::Level::TRACE,
-                                "Meeting engine {} sending destroy peer {:?}",
-                                key,
+                                "Meeting engine {:?} sending destroy peer {:?}",
+                                engine_id,
                                 peer_id,
                             );
                             frames.sender.send(frame.clone()).map_err(|err| {
-                                format!("Meeting engine {} frame sender error: {}", key, err)
+                                format!(
+                                    "Meeting engine {:?} frame sender error: {:?}",
+                                    engine_id, err
+                                )
                             })?;
                         }
                         self.peers.remove(&peer_id);
@@ -520,7 +529,7 @@ impl<Key: std::fmt::Display + Ord> EngineMeeting<Key> {
     }
 }
 
-impl<Key: std::fmt::Display + Ord> Future for EngineMeeting<Key> {
+impl Future for EngineMeeting {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
