@@ -59,7 +59,7 @@ update:
 build-samples:
   cargo build --release --manifest-path ./samples/Cargo.toml --examples
 
-run-sample NAME:
+run-example NAME:
   #!/usr/bin/env bash
   SAMPLE=$(find ./target/release/examples -type f -executable -name "{{NAME}}*" | head -n 1)
   if [ -z "$SAMPLE" ]; then

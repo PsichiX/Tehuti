@@ -91,6 +91,10 @@ impl Meeting {
         &self.name
     }
 
+    pub fn factory(&self) -> &Arc<PeerFactory> {
+        &self.factory
+    }
+
     pub fn pump(&mut self) -> Result<bool, Box<dyn Error>> {
         let mut result = false;
         if let Some(event) = self.engine_event.receiver.try_recv() {
@@ -287,6 +291,7 @@ pub struct MeetingInterfaceResult {
     pub engine_event: Duplex<MeetingEngineEvent>,
 }
 
+#[derive(Clone)]
 pub struct MeetingInterface {
     user_event: Duplex<MeetingUserEvent>,
 }

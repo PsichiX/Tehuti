@@ -174,6 +174,15 @@ where
         }
     }
 
+    pub fn new_unchanged(data: T) -> Self {
+        let meta = P::default();
+        meta.did_changed(&data);
+        Self {
+            meta: Mutex::new(meta),
+            data,
+        }
+    }
+
     pub fn into_inner(self) -> T {
         self.data
     }

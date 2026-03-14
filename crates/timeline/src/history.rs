@@ -4,7 +4,7 @@ use smallvec::SmallVec;
 use std::{
     collections::VecDeque,
     error::Error,
-    ops::{Bound, RangeBounds, RangeInclusive},
+    ops::{Bound, Deref, DerefMut, Index, IndexMut, RangeBounds, RangeInclusive},
 };
 use tehuti::{buffer::Buffer, replication::Replicable};
 
@@ -235,6 +235,23 @@ impl<T: Clone> HistoryBuffer<T> {
             .find(|timestamp| self.get(*timestamp) != other.get(*timestamp))
     }
 
+    pub fn evolve(
+        &mut self,
+        start_timestamp: TimeStamp,
+        end_timestamp: TimeStamp,
+        evolve_fn: impl Fn(&T) -> Result<T, Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut timestamp = start_timestamp;
+        while timestamp < end_timestamp {
+            let current_timestamp = timestamp;
+            timestamp += 1;
+            if let Some(value) = self.get_extrapolated(current_timestamp).cloned() {
+                self.set(timestamp, evolve_fn(&value)?);
+            }
+        }
+        Ok(())
+    }
+
     pub fn collect_changes(
         &self,
         buffer: &mut Buffer,
@@ -337,6 +354,20 @@ impl<T: Clone + std::fmt::Debug> std::fmt::Display for HistoryBuffer<T> {
     }
 }
 
+impl<T: Clone> Index<TimeStamp> for HistoryBuffer<T> {
+    type Output = T;
+
+    fn index(&self, index: TimeStamp) -> &Self::Output {
+        self.get(index).expect("Timestamp out of range")
+    }
+}
+
+impl<T: Clone> IndexMut<TimeStamp> for HistoryBuffer<T> {
+    fn index_mut(&mut self, index: TimeStamp) -> &mut Self::Output {
+        self.get_mut(index).expect("Timestamp out of range")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryEvent<T> {
     start: TimeStamp,
@@ -431,6 +462,32 @@ impl<T: std::fmt::Debug> std::fmt::Display for HistoryEvent<T> {
             writeln!(f, "{}: {:?}", self.start + i as u64, snapshot)?;
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub struct TimedSnapshot<T> {
+    pub simulation_time: f32,
+    pub snapshot: T,
+}
+
+impl<T> Deref for TimedSnapshot<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.snapshot
+    }
+}
+
+impl<T> DerefMut for TimedSnapshot<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.snapshot
+    }
+}
+
+impl<T: std::fmt::Display> std::fmt::Display for TimedSnapshot<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}]: {}", self.simulation_time, self.snapshot)
     }
 }
 
@@ -709,6 +766,36 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn test_history_buffer_evolve() {
+        let mut buffer = HistoryBuffer::with_capacity(4);
+        buffer.set(TimeStamp::new(0), 0);
+        buffer.set(TimeStamp::new(1), 1);
+        buffer.set(TimeStamp::new(2), 2);
+
+        buffer
+            .evolve(TimeStamp::new(1), TimeStamp::new(2), |value| Ok(value + 1))
+            .unwrap();
+        assert_eq!(buffer.get(TimeStamp::new(0)), Some(&0));
+        assert_eq!(buffer.get(TimeStamp::new(1)), Some(&1));
+        assert_eq!(buffer.get(TimeStamp::new(2)), Some(&2));
+
+        buffer
+            .evolve(TimeStamp::new(0), TimeStamp::new(3), |value| Ok(value + 1))
+            .unwrap();
+        assert_eq!(buffer.get(TimeStamp::new(0)), Some(&0));
+        assert_eq!(buffer.get(TimeStamp::new(1)), Some(&1));
+        assert_eq!(buffer.get(TimeStamp::new(2)), Some(&2));
+
+        buffer.set(TimeStamp::new(1), 10);
+        buffer
+            .evolve(TimeStamp::new(1), TimeStamp::new(3), |value| Ok(value + 1))
+            .unwrap();
+        assert_eq!(buffer.get(TimeStamp::new(0)), Some(&0));
+        assert_eq!(buffer.get(TimeStamp::new(1)), Some(&10));
+        assert_eq!(buffer.get(TimeStamp::new(2)), Some(&11));
     }
 
     #[test]

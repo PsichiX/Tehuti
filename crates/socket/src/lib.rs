@@ -72,6 +72,7 @@ pub struct TcpHostSessionEvent {
 pub struct TcpHost {
     listener: TcpListener,
     local_engine_id: EngineId,
+    pub log_frames: bool,
 }
 
 impl TcpHost {
@@ -87,7 +88,13 @@ impl TcpHost {
         Ok(TcpHost {
             listener,
             local_engine_id,
+            log_frames: false,
         })
+    }
+
+    pub fn log_frames(mut self, value: bool) -> Self {
+        self.log_frames = value;
+        self
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, Box<dyn Error>> {
@@ -101,7 +108,8 @@ impl TcpHost {
     pub fn accept(&self) -> Result<Option<TcpSessionResult>, Box<dyn Error>> {
         match self.listener.accept() {
             Ok((stream, _)) => match TcpSession::make(stream, self.local_engine_id) {
-                Ok(session_result) => {
+                Ok(mut session_result) => {
+                    session_result.session.log_frames = self.log_frames;
                     return Ok(Some(session_result));
                 }
                 Err(err) => {
@@ -224,7 +232,7 @@ pub struct TcpSession {
     buffer_in: Vec<u8>,
     buffer_out: Vec<u8>,
     frames: Duplex<ProtocolFrame>,
-    terminated: bool,
+    pub log_frames: bool,
 }
 
 impl TcpSession {
@@ -243,7 +251,7 @@ impl TcpSession {
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
                 Err(e) => {
                     return Err(format!(
-                        "Session {:?}<->{:?} stream hyandshake read error: {}",
+                        "Session {:?}<->{:?} stream handshake read error: {}",
                         stream.local_addr().unwrap(),
                         stream.peer_addr().unwrap(),
                         e
@@ -271,10 +279,15 @@ impl TcpSession {
                 buffer_in: Default::default(),
                 buffer_out: Default::default(),
                 frames: frames_inside,
-                terminated: false,
+                log_frames: false,
             },
             frames: frames_outside,
         })
+    }
+
+    pub fn log_frames(mut self, value: bool) -> Self {
+        self.log_frames = value;
+        self
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, Box<dyn Error>> {
@@ -294,14 +307,6 @@ impl TcpSession {
     }
 
     pub fn maintain(&mut self) -> Result<(), Box<dyn Error>> {
-        if self.terminated {
-            return Err(format!(
-                "Session {:?}<->{:?} is terminated",
-                self.stream.local_addr().unwrap(),
-                self.stream.peer_addr().unwrap()
-            )
-            .into());
-        }
         self.receive_frames()?;
         self.send_frames()?;
         Ok(())
@@ -327,17 +332,42 @@ impl TcpSession {
                 }
             }
         }
+        if self.buffer_in.is_empty() {
+            return Ok(());
+        }
+        if self.log_frames {
+            tracing::event!(
+                target: "tehuti::socket::session",
+                tracing::Level::TRACE,
+                "Session {:?}<->{:?} received {} bytes",
+                self.stream.local_addr().unwrap(),
+                self.stream.peer_addr().unwrap(),
+                self.buffer_in.len()
+            );
+        }
         let mut cursor = Cursor::new(&self.buffer_in);
         let mut frames = Vec::new();
         loop {
             match ProtocolFrame::read(&mut cursor) {
-                Ok(frame) => frames.push(frame),
+                Ok(frame) => {
+                    if self.log_frames {
+                        tracing::event!(
+                            target: "tehuti::socket::session",
+                            tracing::Level::TRACE,
+                            "Session {:?}<->{:?} read frame: {:?}",
+                            self.stream.local_addr().unwrap(),
+                            self.stream.peer_addr().unwrap(),
+                            frame
+                        );
+                    }
+                    frames.push(frame)
+                }
                 Err(ref e) if e.kind() == ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(Box::new(e)),
             }
         }
         let pos = cursor.position() as usize;
-        self.buffer_in.drain(0..pos);
+        self.buffer_in.drain(..pos);
         for mut frame in frames {
             if let ProtocolFrame::Packet(frame) = &mut frame
                 && frame.data.sender.is_none()
@@ -361,13 +391,24 @@ impl TcpSession {
             if let ProtocolFrame::Packet(frame) = &mut frame {
                 frame.data.sender = Some(self.local_engine_id);
             }
+            if self.log_frames {
+                tracing::event!(
+                    target: "tehuti::socket::session",
+                    tracing::Level::TRACE,
+                    "Session {:?}<->{:?} writing frame: {:?}",
+                    self.stream.local_addr().unwrap(),
+                    self.stream.peer_addr().unwrap(),
+                    frame
+                );
+            }
             frame.write(&mut self.buffer_out)?;
         }
-        loop {
-            match self.stream.write(&self.buffer_out) {
+        let position = self.buffer_out.len();
+        while !self.buffer_out.is_empty() {
+            match self.stream.write(&self.buffer_out[..]) {
                 Ok(0) => break,
                 Ok(n) => {
-                    self.buffer_out.drain(0..n);
+                    self.buffer_out.drain(..n);
                 }
                 Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
                 Err(e) => {
@@ -380,6 +421,16 @@ impl TcpSession {
                     .into());
                 }
             }
+        }
+        if self.log_frames && position != self.buffer_out.len() {
+            tracing::event!(
+                target: "tehuti::socket::session",
+                tracing::Level::TRACE,
+                "Session {:?}<->{:?} sent {} bytes",
+                self.stream.local_addr().unwrap(),
+                self.stream.peer_addr().unwrap(),
+                position - self.buffer_out.len()
+            );
         }
         Ok(())
     }

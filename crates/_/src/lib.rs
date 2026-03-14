@@ -52,9 +52,9 @@ pub mod third_party {
 
     pub mod time {
         #[cfg(target_arch = "wasm32")]
-        pub use instant::{Duration, Instant};
+        pub use instant::*;
         #[cfg(not(target_arch = "wasm32"))]
-        pub use std::time::{Duration, Instant};
+        pub use std::time::*;
     }
 }
 

@@ -113,6 +113,19 @@ impl<T> Receiver<T> {
         self.iter().last()
     }
 
+    pub fn single<F>(&self, mut predicate: F) -> Option<T>
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut result = None;
+        for item in self.iter() {
+            if predicate(&item) {
+                result = Some(item);
+            }
+        }
+        result
+    }
+
     pub fn len(&self) -> usize {
         self.0.len()
     }

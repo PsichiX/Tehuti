@@ -104,16 +104,45 @@ impl PeerUserData {
     }
 
     pub fn with<T: Any + Send + Sync + 'static>(mut self, data: T) -> Result<Self, Box<dyn Error>> {
+        self.insert(data)?;
+        Ok(self)
+    }
+
+    pub fn insert<T: Any + Send + Sync + 'static>(
+        &mut self,
+        data: T,
+    ) -> Result<(), Box<dyn Error>> {
         Arc::get_mut(&mut self.0)
             .ok_or("PeerUserData is frozen")?
             .insert(TypeId::of::<T>(), Box::new(data));
-        Ok(self)
+        Ok(())
+    }
+
+    pub fn remove<T: Any + Send + Sync + 'static>(&mut self) -> Result<(), Box<dyn Error>> {
+        Arc::get_mut(&mut self.0)
+            .ok_or("PeerUserData is frozen")?
+            .remove(&TypeId::of::<T>());
+        Ok(())
     }
 
     pub fn access<T: Any + Send + Sync + 'static>(&self) -> Result<&T, Box<dyn Error>> {
         self.0
             .get(&TypeId::of::<T>())
             .and_then(|data| data.downcast_ref::<T>())
+            .ok_or_else(|| {
+                format!(
+                    "User data for type: {} not found!",
+                    std::any::type_name::<T>()
+                )
+                .into()
+            })
+    }
+
+    pub fn access_mut<T: Any + Send + Sync + 'static>(&mut self) -> Result<&mut T, Box<dyn Error>> {
+        Arc::get_mut(&mut self.0)
+            .ok_or("PeerUserData is frozen")?
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|data| data.downcast_mut::<T>())
             .ok_or_else(|| {
                 format!(
                     "User data for type: {} not found!",
@@ -143,6 +172,16 @@ impl PeerKiller {
             peer_id,
             meeting_sender,
             destroy_on_drop: true,
+        }
+    }
+
+    pub fn take(&mut self) -> Self {
+        let destroy_on_drop = self.destroy_on_drop;
+        self.destroy_on_drop = false;
+        Self {
+            peer_id: self.peer_id,
+            meeting_sender: self.meeting_sender.clone(),
+            destroy_on_drop,
         }
     }
 }
@@ -587,12 +626,8 @@ impl PeerDestructurer {
         self.peer.user_data()
     }
 
-    pub fn killer(&mut self) -> PeerKiller {
-        PeerKiller {
-            peer_id: self.peer.info.peer_id,
-            meeting_sender: self.peer.killer.meeting_sender.clone(),
-            destroy_on_drop: true,
-        }
+    pub fn take_killer(&mut self) -> PeerKiller {
+        self.peer.killer.take()
     }
 
     pub fn read<Message: Send + 'static>(
@@ -653,14 +688,14 @@ impl PeerDestructurer {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PeerFactory {
     #[allow(clippy::type_complexity)]
     registry: BTreeMap<
         PeerRoleId,
         Arc<dyn Fn(PeerBuilder) -> Result<PeerBuilder, Box<dyn Error>> + Send + Sync>,
     >,
-    user_data: PeerUserData,
+    pub user_data: PeerUserData,
 }
 
 impl PeerFactory {
@@ -698,7 +733,7 @@ impl PeerFactory {
     ) {
         tracing::event!(
             target: "tehuti::peer",
-            tracing::Level::DEBUG,
+            tracing::Level::TRACE,
             "Registering Peer Role id {:?}", role_id
         );
         self.registry.insert(role_id, Arc::new(builder_fn));
@@ -706,6 +741,19 @@ impl PeerFactory {
 
     pub fn register_typed<T: TypedPeerRole + 'static>(&mut self) {
         self.register(T::ROLE_ID, T::builder);
+    }
+
+    pub fn unregister(&mut self, role_id: PeerRoleId) {
+        tracing::event!(
+            target: "tehuti::peer",
+            tracing::Level::TRACE,
+            "Unregistering Peer Role id {:?}", role_id
+        );
+        self.registry.remove(&role_id);
+    }
+
+    pub fn unregister_typed<T: TypedPeerRole + 'static>(&mut self) {
+        self.unregister(T::ROLE_ID);
     }
 
     pub fn create(&self, peer: Peer) -> Result<PeerBuildResult, Box<dyn Error>> {

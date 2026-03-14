@@ -334,7 +334,7 @@ impl Game {
         // divergence with client's predicted state. If any received state
         // update diverged from client's predicted state, we need to resimulate
         // the game from the last known compatible tick.
-        let divergence = self.client_find_state_divergence()?;
+        let divergence = self.client_find_state_divergence(delta_time)?;
 
         if let Some(divergence) = divergence {
             self.resimulate(divergence, delta_time)?;
@@ -360,8 +360,12 @@ impl Game {
         Ok(())
     }
 
-    fn client_find_state_divergence(&mut self) -> Result<Option<TimeStamp>, Box<dyn Error>> {
+    fn client_find_state_divergence(
+        &mut self,
+        delta_time: f32,
+    ) -> Result<Option<TimeStamp>, Box<dyn Error>> {
         let mut divergence = None;
+        let current_tick = self.authority.extension().unwrap().clock.tick();
 
         for player in self.players.values_mut() {
             match player {
@@ -383,11 +387,23 @@ impl Game {
                 // on client so we don't need to check for divergence here.
                 PlayerRole::ClientRemote {
                     state_receiver,
-                    state_snapshot,
+                    state_history,
                     ..
                 } => {
                     if let Some(Dispatch { message, .. }) = state_receiver.last() {
-                        message.apply_history(state_snapshot)?;
+                        let div = message.apply_history_divergence(state_history)?;
+                        if let Some(div) = div {
+                            state_history.evolve(div, current_tick, |state| {
+                                let mut state = *state;
+                                state.position_x.0 += state.velocity_x.0 * delta_time;
+                                state.position_y.0 += state.velocity_y.0 * delta_time;
+                                state.position_x.0 =
+                                    state.position_x.0.clamp(0.0, (WORLD_SIZE.0 - 1) as f32);
+                                state.position_y.0 =
+                                    state.position_y.0.clamp(0.0, (WORLD_SIZE.1 - 1) as f32);
+                                Ok(state)
+                            })?;
+                        }
                     }
                 }
                 _ => {}
@@ -708,7 +724,7 @@ enum PlayerRole {
     ClientRemote {
         info: PeerInfo,
         state_receiver: Receiver<Dispatch<HistoryEvent<StateSnapshot>>>,
-        state_snapshot: HistoryBuffer<StateSnapshot>,
+        state_history: HistoryBuffer<StateSnapshot>,
     },
 }
 
@@ -745,7 +761,7 @@ impl PlayerRole {
             Self::ServerLocal { state_history, .. } => state_history,
             Self::ServerRemote { state_history, .. } => state_history,
             Self::ClientLocal { state_history, .. } => state_history,
-            Self::ClientRemote { state_snapshot, .. } => state_snapshot,
+            Self::ClientRemote { state_history, .. } => state_history,
         }
     }
 
@@ -754,7 +770,7 @@ impl PlayerRole {
             Self::ServerLocal { state_history, .. } => state_history,
             Self::ServerRemote { state_history, .. } => state_history,
             Self::ClientLocal { state_history, .. } => state_history,
-            Self::ClientRemote { state_snapshot, .. } => state_snapshot,
+            Self::ClientRemote { state_history, .. } => state_history,
         }
     }
 }
@@ -832,7 +848,7 @@ impl TypedPeer for PlayerRole {
             (false, false) => Ok(Self::ClientRemote {
                 info: *peer.info(),
                 state_receiver: peer.read::<StateEvent>(PLAYER_STATE_CHANNEL)?,
-                state_snapshot: HistoryBuffer::with_capacity(1),
+                state_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
             }),
         }
     }

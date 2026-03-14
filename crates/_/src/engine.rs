@@ -183,6 +183,10 @@ impl EngineMeeting {
         }
     }
 
+    pub fn meeting_factory(&self) -> &Arc<PeerFactory> {
+        self.meeting.factory()
+    }
+
     pub fn maintain(&mut self) -> Result<(), Box<dyn Error>> {
         // Handle engine meeting control events.
         for event in self.events_receiver.iter() {
