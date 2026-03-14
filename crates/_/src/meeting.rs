@@ -107,7 +107,8 @@ impl Meeting {
         }
         for peer in self.peers.values_mut() {
             for channel in peer {
-                result = result || channel.pump()?;
+                let pumped = channel.pump()?;
+                result = result || pumped;
             }
         }
         Ok(result)
@@ -125,7 +126,8 @@ impl Meeting {
         }
         for peer in self.peers.values_mut() {
             for channel in peer {
-                result = result || channel.pump_all()? > 0;
+                let pumped = channel.pump_all()? > 0;
+                result = result || pumped;
             }
         }
         Ok(result)

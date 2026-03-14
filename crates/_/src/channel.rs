@@ -8,7 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     error::Error,
     hash::Hash,
     io::Cursor,
@@ -56,6 +56,7 @@ impl std::fmt::Display for ChannelId {
     }
 }
 
+#[derive(Debug)]
 pub struct Dispatch<Message: Send + 'static> {
     pub message: Message,
     pub recepients: PacketRecepients,
@@ -127,6 +128,8 @@ pub enum ChannelKind {
 /// with outside world.
 pub struct Channel {
     kind: ChannelKind,
+    message_type_name: &'static str,
+    message_type_id: TypeId,
     pump: Box<dyn FnMut() -> Result<bool, Box<dyn Error>> + Send>,
     pump_all: Box<dyn FnMut() -> Result<usize, Box<dyn Error>> + Send>,
 }
@@ -204,6 +207,8 @@ impl Channel {
         });
         Self {
             kind: ChannelKind::Read,
+            message_type_name: std::any::type_name::<Message>(),
+            message_type_id: TypeId::of::<Message>(),
             pump,
             pump_all,
         }
@@ -281,6 +286,8 @@ impl Channel {
         });
         Self {
             kind: ChannelKind::Write,
+            message_type_name: std::any::type_name::<Message>(),
+            message_type_id: TypeId::of::<Message>(),
             pump,
             pump_all,
         }
@@ -290,12 +297,30 @@ impl Channel {
         self.kind
     }
 
+    pub fn message_type_name(&self) -> &'static str {
+        self.message_type_name
+    }
+
+    pub fn message_type_id(&self) -> TypeId {
+        self.message_type_id
+    }
+
     pub fn pump(&mut self) -> Result<bool, Box<dyn Error>> {
         (self.pump)()
     }
 
     pub fn pump_all(&mut self) -> Result<usize, Box<dyn Error>> {
         (self.pump_all)()
+    }
+}
+
+impl std::fmt::Debug for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Channel")
+            .field("kind", &self.kind)
+            .field("message_type_name", &self.message_type_name)
+            .field("message_type_id", &self.message_type_id)
+            .finish()
     }
 }
 

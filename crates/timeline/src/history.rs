@@ -394,6 +394,20 @@ impl<T> HistoryEvent<T> {
             .map(move |(index, snapshot)| (self.start + index as u64, snapshot))
     }
 
+    pub fn new(start: TimeStamp, snapshots: impl IntoIterator<Item = T>) -> Self {
+        Self {
+            start,
+            snapshots: snapshots.into_iter().collect(),
+        }
+    }
+
+    pub fn single(timestamp: TimeStamp, snapshot: T) -> Self {
+        Self {
+            start: timestamp,
+            snapshots: [snapshot].into_iter().collect(),
+        }
+    }
+
     pub fn collect_history(
         buffer: &HistoryBuffer<T>,
         range: impl RangeBounds<TimeStamp> + Clone,
