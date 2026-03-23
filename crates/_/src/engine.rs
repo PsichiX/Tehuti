@@ -6,6 +6,7 @@ use crate::{
     peer::{PeerFactory, PeerId, PeerInfo},
     protocol::{ProtocolControlFrame, ProtocolFrame, ProtocolPacketData, ProtocolPacketFrame},
     replication::Replicable,
+    third_party::time::{Duration, Instant},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,6 +15,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    thread::{Builder, JoinHandle, sleep},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -68,6 +70,7 @@ pub struct EnginePeerDescriptor {
     pub info: PeerInfo,
     pub packet_senders: BTreeMap<ChannelId, EnginePacketSender>,
     pub packet_receivers: BTreeMap<ChannelId, EnginePacketReceiver>,
+    pub origin_engine: Option<EngineId>,
 }
 
 pub enum EngineMeetingEvent {
@@ -82,7 +85,6 @@ pub enum EngineMeetingEvent {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EngineMeetingConfig {
-    pub warn_unhandled_control_frame: bool,
     pub warn_duplicate_peer_creation: bool,
     pub warn_unknown_peer_destruction: bool,
     pub warn_unknown_peer_packet: bool,
@@ -92,7 +94,6 @@ pub struct EngineMeetingConfig {
 
 impl EngineMeetingConfig {
     pub fn disable_all_warnings(mut self) -> Self {
-        self.warn_unhandled_control_frame = false;
         self.warn_duplicate_peer_creation = false;
         self.warn_unknown_peer_destruction = false;
         self.warn_unknown_peer_packet = false;
@@ -102,17 +103,11 @@ impl EngineMeetingConfig {
     }
 
     pub fn enable_all_warnings(mut self) -> Self {
-        self.warn_unhandled_control_frame = true;
         self.warn_duplicate_peer_creation = true;
         self.warn_unknown_peer_destruction = true;
         self.warn_unknown_peer_packet = true;
         self.warn_unknown_channel_packet = true;
         self.warn_unhandled_engine_event = true;
-        self
-    }
-
-    pub fn warn_unhandled_control_frame(mut self, value: bool) -> Self {
-        self.warn_unhandled_control_frame = value;
         self
     }
 
@@ -153,8 +148,12 @@ pub struct EngineMeeting {
     meeting: Meeting,
     engine_event: Duplex<MeetingEngineEvent>,
     peers: BTreeMap<PeerId, EnginePeerDescriptor>,
-    engines: BTreeMap<EngineId, Duplex<ProtocolFrame>>,
+    engines: BTreeMap<EngineId, (Duplex<ProtocolFrame>, Instant)>,
     events_receiver: Receiver<EngineMeetingEvent>,
+    heartbeat_timestamp: u64,
+    heartbeat_timer: Instant,
+    pub heartbeat_interval: Duration,
+    pub engine_disconnect_timeout: Duration,
 }
 
 impl EngineMeeting {
@@ -177,19 +176,114 @@ impl EngineMeeting {
                 peers: Default::default(),
                 engines: Default::default(),
                 events_receiver,
+                heartbeat_timestamp: 0,
+                heartbeat_timer: Instant::now(),
+                heartbeat_interval: Duration::from_secs(1),
+                engine_disconnect_timeout: Duration::from_secs(5),
             },
             interface,
             events_sender,
         }
     }
 
+    pub fn heartbeat_interval(mut self, interval: Duration) -> Self {
+        self.heartbeat_interval = interval;
+        self
+    }
+
+    pub fn engine_disconnect_timeout(mut self, timeout: Duration) -> Self {
+        self.engine_disconnect_timeout = timeout;
+        self
+    }
+
     pub fn meeting_factory(&self) -> &Arc<PeerFactory> {
         self.meeting.factory()
     }
 
+    pub fn meeting_peers(&self) -> impl Iterator<Item = PeerId> {
+        self.meeting.peers()
+    }
+
+    pub fn peers(&self) -> impl Iterator<Item = PeerId> {
+        self.peers.keys().copied()
+    }
+
+    pub fn engines(&self) -> impl Iterator<Item = EngineId> {
+        self.engines.keys().copied()
+    }
+
     pub fn maintain(&mut self) -> Result<(), Box<dyn Error>> {
+        // Send hearbeats to engines and check for engine disconnect.
+        if self.heartbeat_timer.elapsed() >= self.heartbeat_interval {
+            self.heartbeat_timestamp = self.heartbeat_timestamp.wrapping_add(1);
+            let frame = ProtocolFrame::Control(ProtocolControlFrame::Heartbeat {
+                timestamp: self.heartbeat_timestamp,
+            });
+            for (engine_id, (frames, _)) in &self.engines {
+                tracing::event!(
+                    target: "tehuti::engine::meeting",
+                    tracing::Level::TRACE,
+                    "Meeting engine {:?} sending heartbeat {:?}",
+                    engine_id,
+                    self.heartbeat_timestamp,
+                );
+                if !frames.sender.try_send(frame.clone()) {
+                    tracing::event!(
+                        target: "tehuti::engine::meeting",
+                        tracing::Level::ERROR,
+                        "Meeting engine {:?} frame sender disconnected (heartbeat)",
+                        engine_id,
+                    );
+                }
+            }
+            self.heartbeat_timer = Instant::now();
+        }
+        self.engines.retain(|engine_id, (frames, last_seen)| {
+            if frames.sender.is_disconnected()
+                || frames.receiver.is_disconnected()
+                || last_seen.elapsed() > self.engine_disconnect_timeout
+            {
+                tracing::event!(
+                    target: "tehuti::engine::meeting",
+                    tracing::Level::WARN,
+                    "Meeting engine {:?} is disconnected. Unregistering",
+                    engine_id,
+                );
+                self.peers.retain(|peer_id, descriptor| {
+                    if descriptor.origin_engine == Some(*engine_id) {
+                        tracing::event!(
+                            target: "tehuti::engine::meeting",
+                            tracing::Level::TRACE,
+                            "Meeting destroying peer {:?} due to engine {:?} disconnection",
+                            peer_id,
+                            engine_id,
+                        );
+                        if !self
+                            .engine_event
+                            .sender
+                            .try_send(MeetingEngineEvent::PeerLeft(*peer_id))
+                        {
+                            tracing::event!(
+                                target: "tehuti::engine::meeting",
+                                tracing::Level::ERROR,
+                                "Meeting engine {:?} failed to send peer left event for peer {:?}",
+                                engine_id,
+                                peer_id,
+                            );
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                });
+                false
+            } else {
+                true
+            }
+        });
+
         // Handle engine meeting control events.
-        for event in self.events_receiver.iter() {
+        'meeting_control_events: for event in self.events_receiver.iter() {
             match event {
                 EngineMeetingEvent::RegisterEngine { engine_id, frames } => {
                     tracing::event!(
@@ -211,11 +305,17 @@ impl EngineMeeting {
                             descriptor.info.peer_id,
                             descriptor.info.role_id,
                         ));
-                        frames.sender.send(frame).map_err(|err| {
-                            format!("Meeting engine {:?} frame sender error: {}", engine_id, err)
-                        })?;
+                        if !frames.sender.try_send(frame) {
+                            tracing::event!(
+                                target: "tehuti::engine::meeting",
+                                tracing::Level::ERROR,
+                                "Meeting engine {:?} frame sender disconnected (register create peer)",
+                                engine_id,
+                            );
+                            continue 'meeting_control_events;
+                        }
                     }
-                    self.engines.insert(engine_id, frames);
+                    self.engines.insert(engine_id, (frames, Instant::now()));
                 }
                 EngineMeetingEvent::UnregisterEngine { engine_id } => {
                     tracing::event!(
@@ -225,38 +325,78 @@ impl EngineMeeting {
                         engine_id,
                     );
                     self.engines.remove(&engine_id);
+                    self.peers.retain(|peer_id, descriptor| {
+                        if descriptor.origin_engine == Some(engine_id) {
+                            tracing::event!(
+                                target: "tehuti::engine::meeting",
+                                tracing::Level::TRACE,
+                                "Meeting destroying peer {:?} due to engine {:?} unregistration",
+                                peer_id,
+                                engine_id,
+                            );
+                            if !self
+                                .engine_event
+                                .sender
+                                .try_send(MeetingEngineEvent::PeerLeft(*peer_id))
+                            {
+                                tracing::event!(
+                                    target: "tehuti::engine::meeting",
+                                    tracing::Level::ERROR,
+                                    "Meeting engine {:?} failed to send peer left event for peer {:?}",
+                                    engine_id,
+                                    peer_id,
+                                );
+                            }
+                            false
+                        } else {
+                            true
+                        }
+                    });
                 }
             }
         }
 
         // Process receiving frames from all engines.
-        for (engine_id, frames) in &self.engines {
+        let mut refresh_engines = Vec::new();
+        for (engine_id, (frames, _)) in &self.engines {
             for frame in frames.receiver.iter() {
                 match frame {
                     ProtocolFrame::Control(frame) => {
-                        for (engine_id2, frames2) in &self.engines {
-                            if engine_id != engine_id2 {
-                                tracing::event!(
-                                    target: "tehuti::engine::meeting",
-                                    tracing::Level::TRACE,
-                                    "Meeting engine {:?} forwarding control frame to {:?}: {:?}",
-                                    engine_id,
-                                    engine_id2,
-                                    frame,
-                                );
-                                frames2
-                                    .sender
-                                    .send(ProtocolFrame::Control(frame.clone()))
-                                    .map_err(|err| {
-                                        format!(
-                                            "Meeting engine {:?} frame sender error: {:?}",
-                                            engine_id, err
-                                        )
-                                    })?;
+                        if !matches!(frame, ProtocolControlFrame::Heartbeat { .. }) {
+                            for (engine_id2, (frames2, _)) in &self.engines {
+                                if engine_id != engine_id2 {
+                                    tracing::event!(
+                                        target: "tehuti::engine::meeting",
+                                        tracing::Level::TRACE,
+                                        "Meeting engine {:?} forwarding control frame to {:?}: {:?}",
+                                        engine_id,
+                                        engine_id2,
+                                        frame,
+                                    );
+                                    frames2
+                                        .sender
+                                        .send(ProtocolFrame::Control(frame.clone()))
+                                        .map_err(|err| {
+                                            format!(
+                                                "Meeting engine {:?} frame sender error (forwarding control frame): {:?}",
+                                                engine_id, err
+                                            )
+                                        })?;
+                                }
                             }
                         }
 
                         match frame {
+                            ProtocolControlFrame::Heartbeat { timestamp } => {
+                                tracing::event!(
+                                    target: "tehuti::engine::meeting",
+                                    tracing::Level::TRACE,
+                                    "Meeting engine {:?} got heartbeat {:?}",
+                                    engine_id,
+                                    timestamp,
+                                );
+                                refresh_engines.push(*engine_id);
+                            }
                             ProtocolControlFrame::CreatePeer(peer_id, peer_role_id) => {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
@@ -266,16 +406,30 @@ impl EngineMeeting {
                                     peer_id,
                                     peer_role_id,
                                 );
-                                self.engine_event
+                                if let Err(error) = self
+                                    .engine_event
                                     .sender
-                                    .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
+                                    .send(MeetingEngineEvent::PeerJoined(
+                                        *engine_id,
+                                        peer_id,
+                                        peer_role_id,
+                                    ))
                                     .map_err(|err| {
                                         format!(
-                                            "Meeting engine {:?} outside engine sender error: {:?}",
+                                            "Meeting engine {:?} outside engine sender error (peer joined): {:?}",
                                             engine_id, err
                                         )
                                     })
-                                    .unwrap();
+                                {
+                                    tracing::event!(
+                                        target: "tehuti::engine::meeting",
+                                        tracing::Level::ERROR,
+                                        "Meeting engine {:?} failed to send peer joined event for peer {:?}: {:?}",
+                                        engine_id,
+                                        peer_id,
+                                        error,
+                                    );
+                                }
                             }
                             ProtocolControlFrame::DestroyPeer(peer_id) => {
                                 tracing::event!(
@@ -285,32 +439,31 @@ impl EngineMeeting {
                                     engine_id,
                                     peer_id,
                                 );
-                                self.engine_event
+                                if let Err(error) = self
+                                    .engine_event
                                     .sender
                                     .send(MeetingEngineEvent::PeerLeft(peer_id))
                                     .map_err(|err| {
                                         format!(
-                                            "Meeting engine {:?} outside engine sender error: {:?}",
+                                            "Meeting engine {:?} outside engine sender error (peer left): {:?}",
                                             engine_id, err
                                         )
                                     })
-                                    .unwrap();
-                            }
-                            _ => {
-                                if self.config.warn_unhandled_control_frame {
+                                {
                                     tracing::event!(
                                         target: "tehuti::engine::meeting",
-                                        tracing::Level::WARN,
-                                        "Meeting engine {:?} got unhandled control frame: {:?}",
+                                        tracing::Level::ERROR,
+                                        "Meeting engine {:?} failed to send peer left event for peer {:?}: {:?}",
                                         engine_id,
-                                        frame,
+                                        peer_id,
+                                        error,
                                     );
                                 }
                             }
                         }
                     }
                     ProtocolFrame::Packet(frame) => {
-                        for (engine_id2, frames2) in &self.engines {
+                        for (engine_id2, (frames2, _)) in &self.engines {
                             if !frame.data.recepients.is_empty()
                                 && !frame.data.recepients.contains(engine_id2)
                             {
@@ -332,7 +485,7 @@ impl EngineMeeting {
                                     .send(ProtocolFrame::Packet(frame.clone()))
                                     .map_err(|err| {
                                         format!(
-                                            "Meeting engine {:?} frame sender error: {:?}",
+                                            "Meeting engine {:?} frame sender error (forwarding packet frame): {:?}",
                                             engine_id2, err
                                         )
                                     })?;
@@ -350,16 +503,22 @@ impl EngineMeeting {
                                     frame.channel_id,
                                     frame.data.data.len(),
                                 );
-                                sender
-                                    .sender
-                                    .send(frame.data)
-                                    .map_err(|err| {
-                                        format!(
-                                            "Meeting engine {:?} packet sender error: {:?}",
-                                            engine_id, err
-                                        )
-                                    })
-                                    .unwrap();
+                                if let Err(error) = sender.sender.send(frame.data).map_err(|err| {
+                                    format!(
+                                        "Meeting engine {:?} packet sender error (sending packet data): {:?}",
+                                        engine_id, err
+                                    )
+                                }) {
+                                    tracing::event!(
+                                        target: "tehuti::engine::meeting",
+                                        tracing::Level::ERROR,
+                                        "Meeting engine {:?} failed to send packet data to peer {:?} channel {:?}: {:?}",
+                                        engine_id,
+                                        frame.peer_id,
+                                        frame.channel_id,
+                                        error,
+                                    );
+                                }
                             } else if self.config.warn_unknown_channel_packet {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
@@ -383,6 +542,11 @@ impl EngineMeeting {
                 }
             }
         }
+        for engine_id in refresh_engines {
+            if let Some((_, last_seen)) = self.engines.get_mut(&engine_id) {
+                *last_seen = Instant::now();
+            }
+        }
 
         // Handle sending packets from peers to all sessions.
         for peer in self.peers.values() {
@@ -395,7 +559,7 @@ impl EngineMeeting {
                         channel_id: *channel_id,
                         data,
                     });
-                    for (engine_id, frames) in &self.engines {
+                    for (engine_id, (frames, _)) in &self.engines {
                         if !recepients.is_empty() && !recepients.contains(engine_id) {
                             continue;
                         }
@@ -410,7 +574,7 @@ impl EngineMeeting {
                         );
                         frames.sender.send(frame.clone()).map_err(|err| {
                             format!(
-                                "Meeting engine {:?} frame sender error: {:?}",
+                                "Meeting engine {:?} frame sender error (forwarding packet frame): {:?}",
                                 engine_id, err
                             )
                         })?;
@@ -454,7 +618,7 @@ impl EngineMeeting {
                                 descriptor.info.peer_id,
                                 descriptor.info.role_id,
                             ));
-                            for (engine_id, frames) in &self.engines {
+                            for (engine_id, (frames, _)) in &self.engines {
                                 tracing::event!(
                                     target: "tehuti::engine::meeting",
                                     tracing::Level::TRACE,
@@ -465,7 +629,7 @@ impl EngineMeeting {
                                 );
                                 frames.sender.send(frame.clone()).map_err(|err| {
                                     format!(
-                                        "Meeting engine {:?} frame sender error: {:?}",
+                                        "Meeting engine {:?} frame sender error (create peer): {:?}",
                                         engine_id, err
                                     )
                                 })?;
@@ -491,7 +655,7 @@ impl EngineMeeting {
                         );
                         let frame =
                             ProtocolFrame::Control(ProtocolControlFrame::DestroyPeer(peer_id));
-                        for (engine_id, frames) in &self.engines {
+                        for (engine_id, (frames, _)) in &self.engines {
                             tracing::event!(
                                 target: "tehuti::engine::meeting",
                                 tracing::Level::TRACE,
@@ -501,7 +665,7 @@ impl EngineMeeting {
                             );
                             frames.sender.send(frame.clone()).map_err(|err| {
                                 format!(
-                                    "Meeting engine {:?} frame sender error: {:?}",
+                                    "Meeting engine {:?} frame sender error (destroy peer): {:?}",
                                     engine_id, err
                                 )
                             })?;
@@ -530,6 +694,37 @@ impl EngineMeeting {
         }
 
         Ok(())
+    }
+
+    pub fn run(
+        mut self,
+        interval: Duration,
+        terminate_receiver: Receiver<()>,
+    ) -> Result<JoinHandle<()>, Box<dyn Error>> {
+        Ok(Builder::new()
+            .name(self.meeting.name().to_string())
+            .spawn(move || {
+                loop {
+                    if terminate_receiver.try_recv().is_some() {
+                        tracing::event!(
+                            target: "tehuti::engine::meeting",
+                            tracing::Level::TRACE,
+                            "Meeting terminating on request",
+                        );
+                        break;
+                    }
+                    if let Err(err) = self.maintain() {
+                        tracing::event!(
+                            target: "tehuti::engine::meeting",
+                            tracing::Level::ERROR,
+                            "Meeting terminated with error: {}",
+                            err,
+                        );
+                        return;
+                    }
+                    sleep(interval);
+                }
+            })?)
     }
 }
 

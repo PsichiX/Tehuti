@@ -25,8 +25,15 @@ impl<T> Sender<T> {
     where
         T: 'static,
     {
-        self.0.send(value)?;
+        self.0.try_send(value)?;
         Ok(())
+    }
+
+    pub fn try_send(&self, value: T) -> bool
+    where
+        T: 'static,
+    {
+        self.send(value).is_ok()
     }
 
     pub async fn send_async(&self, value: T) -> Result<(), Box<dyn Error>>
@@ -35,6 +42,10 @@ impl<T> Sender<T> {
     {
         self.0.send_async(value).await?;
         Ok(())
+    }
+
+    pub fn receiver_count(&self) -> usize {
+        self.0.receiver_count()
     }
 
     pub fn len(&self) -> usize {
@@ -124,6 +135,10 @@ impl<T> Receiver<T> {
             }
         }
         result
+    }
+
+    pub fn sender_count(&self) -> usize {
+        self.0.sender_count()
     }
 
     pub fn len(&self) -> usize {

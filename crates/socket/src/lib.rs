@@ -20,47 +20,6 @@ pub type TcpMeetingResult = EngineMeetingResult;
 pub type TcpMeeting = EngineMeeting;
 pub type TcpMeetingConfig = EngineMeetingConfig;
 
-pub trait TcpMeetingExt {
-    fn run(
-        self,
-        interval: Duration,
-        terminate_receiver: Receiver<()>,
-    ) -> Result<JoinHandle<()>, Box<dyn Error>>;
-}
-
-impl TcpMeetingExt for EngineMeeting {
-    fn run(
-        mut self,
-        interval: Duration,
-        terminate_receiver: Receiver<()>,
-    ) -> Result<JoinHandle<()>, Box<dyn Error>> {
-        Ok(Builder::new()
-            .name("TcpMeeting".to_string())
-            .spawn(move || {
-                loop {
-                    if terminate_receiver.try_recv().is_some() {
-                        tracing::event!(
-                            target: "tehuti::socket::meeting",
-                            tracing::Level::TRACE,
-                            "Meeting terminating on request",
-                        );
-                        break;
-                    }
-                    if let Err(err) = self.maintain() {
-                        tracing::event!(
-                            target: "tehuti::socket::meeting",
-                            tracing::Level::ERROR,
-                            "Meeting terminated with error: {}",
-                            err,
-                        );
-                        return;
-                    }
-                    sleep(interval);
-                }
-            })?)
-    }
-}
-
 pub struct TcpHostSessionEvent {
     pub local_addr: SocketAddr,
     pub peer_addr: SocketAddr,
@@ -502,7 +461,7 @@ mod tests {
         codec::replicable::RepCodec,
         meeting::MeetingUserEvent,
         peer::{
-            PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerRoleId, TypedPeer,
+            PeerBuilder, PeerDestructurer, PeerFactory, PeerId, PeerKiller, PeerRoleId, TypedPeer,
             TypedPeerRole,
         },
     };
@@ -511,6 +470,7 @@ mod tests {
 
     struct Chatter {
         pub messages: Duplex<Dispatch<String>>,
+        _killer: PeerKiller,
     }
 
     impl TypedPeerRole for Chatter {
@@ -529,6 +489,7 @@ mod tests {
         fn into_typed(mut destructurer: PeerDestructurer) -> Result<Self, Box<dyn Error>> {
             Ok(Self {
                 messages: destructurer.read_write::<String>(ChannelId::new(0))?,
+                _killer: destructurer.take_killer(),
             })
         }
     }
@@ -609,8 +570,18 @@ mod tests {
 
             sleep(Duration::from_secs(1));
 
-            println!("* Server done, exiting...");
+            println!("* Server killing peer...");
             drop(peer);
+            let peer_id = mock_recv_matching!(
+                interface.receiver,
+                Duration::from_secs(1),
+                MeetingUserEvent::PeerRemoved(peer_id) => peer_id
+            );
+            assert_eq!(peer_id, PeerId::new(0));
+
+            sleep(Duration::from_secs(1));
+
+            println!("* Server done, exiting...");
             terminate_session_sender.send(()).unwrap();
             terminate_meeting_sender.send(()).unwrap();
             meeting_thread.join().unwrap();
@@ -675,6 +646,16 @@ mod tests {
                 .unwrap();
             println!("* Client received message: {}", msg.message);
             assert_eq!(&msg.message, "Hello from server to client");
+
+            sleep(Duration::from_secs(1));
+
+            println!("* Client waiting for peer to be destroyed...");
+            let peer_id = mock_recv_matching!(
+                interface.receiver,
+                Duration::from_secs(1),
+                MeetingUserEvent::PeerRemoved(peer_id) => peer_id
+            );
+            assert_eq!(peer_id, PeerId::new(0));
 
             sleep(Duration::from_secs(1));
 

@@ -9,8 +9,8 @@ use std::{
 };
 use tehuti::{engine::EngineId, event::unbounded, meeting::MeetingInterface, peer::PeerFactory};
 use tehuti_socket::{
-    TcpHost, TcpHostSessionEvent, TcpMeeting, TcpMeetingConfig, TcpMeetingEvent, TcpMeetingExt,
-    TcpMeetingResult, TcpSession, TcpSessionResult,
+    TcpHost, TcpHostSessionEvent, TcpMeeting, TcpMeetingConfig, TcpMeetingEvent, TcpMeetingResult,
+    TcpSession, TcpSessionResult,
 };
 
 pub fn tcp_example(

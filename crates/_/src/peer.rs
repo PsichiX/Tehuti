@@ -4,7 +4,6 @@ use crate::{
     codec::Codec,
     engine::{EnginePacketReceiver, EnginePacketSender, EnginePeerDescriptor},
     event::{Duplex, Receiver, Sender, bounded, unbounded},
-    meeting::MeetingUserEvent,
     protocol::ProtocolPacketData,
     replication::Replicable,
 };
@@ -162,15 +161,15 @@ impl std::fmt::Debug for PeerUserData {
 #[derive(Debug)]
 pub struct PeerKiller {
     peer_id: PeerId,
-    meeting_sender: Sender<MeetingUserEvent>,
+    kill_sender: Sender<PeerId>,
     pub destroy_on_drop: bool,
 }
 
 impl PeerKiller {
-    pub fn new(peer_id: PeerId, meeting_sender: Sender<MeetingUserEvent>) -> Self {
+    pub fn new(peer_id: PeerId, kill_sender: Sender<PeerId>) -> Self {
         Self {
             peer_id,
-            meeting_sender,
+            kill_sender,
             destroy_on_drop: true,
         }
     }
@@ -180,7 +179,7 @@ impl PeerKiller {
         self.destroy_on_drop = false;
         Self {
             peer_id: self.peer_id,
-            meeting_sender: self.meeting_sender.clone(),
+            kill_sender: self.kill_sender.clone(),
             destroy_on_drop,
         }
     }
@@ -192,11 +191,23 @@ impl Drop for PeerKiller {
             tracing::event!(
                 target: "tehuti::peer",
                 tracing::Level::TRACE,
-                "Destroying Peer {:?}", self.peer_id
+                "Destroying Peer {:?} on drop", self.peer_id
             );
-            let _ = self
-                .meeting_sender
-                .send(MeetingUserEvent::PeerDestroy(self.peer_id));
+            if let Err(error) = self.kill_sender.send(self.peer_id) {
+                tracing::event!(
+                    target: "tehuti::peer",
+                    tracing::Level::ERROR,
+                    "Failed to send PeerDestroy event for Peer {:?}: {:?}",
+                    self.peer_id, error
+                );
+            }
+        } else {
+            tracing::event!(
+                target: "tehuti::peer",
+                tracing::Level::TRACE,
+                "Peer {:?} drop without destroying",
+                self.peer_id
+            );
         }
     }
 }
@@ -214,13 +225,13 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub fn new(info: PeerInfo, meeting_sender: Sender<MeetingUserEvent>) -> Self {
+    pub fn new(info: PeerInfo, kill_sender: Sender<PeerId>) -> Self {
         Self {
             info,
             user_data: Default::default(),
             receivers: Default::default(),
             senders: Default::default(),
-            killer: PeerKiller::new(info.peer_id, meeting_sender),
+            killer: PeerKiller::new(info.peer_id, kill_sender),
         }
     }
 
@@ -570,6 +581,7 @@ impl PeerBuilder {
             info: self.peer.info,
             packet_senders,
             packet_receivers,
+            origin_engine: None,
         };
         PeerBuildResult {
             peer: self.peer,
@@ -606,12 +618,17 @@ impl TypedPeer for () {
 
 pub struct PeerDestructurer {
     peer: Peer,
+    killer_destroy_on_drop: bool,
 }
 
 impl PeerDestructurer {
     pub fn new(mut peer: Peer) -> Self {
+        let killer_destroy_on_drop = peer.killer.destroy_on_drop;
         peer.killer.destroy_on_drop = false;
-        Self { peer }
+        Self {
+            peer,
+            killer_destroy_on_drop,
+        }
     }
 
     pub fn into_peer(self) -> Peer {
@@ -627,7 +644,9 @@ impl PeerDestructurer {
     }
 
     pub fn take_killer(&mut self) -> PeerKiller {
-        self.peer.killer.take()
+        let mut killer = self.peer.killer.take();
+        killer.destroy_on_drop = self.killer_destroy_on_drop;
+        killer
     }
 
     pub fn read<Message: Send + 'static>(

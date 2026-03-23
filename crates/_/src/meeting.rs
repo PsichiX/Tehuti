@@ -1,6 +1,6 @@
 use crate::{
     channel::Channel,
-    engine::EnginePeerDescriptor,
+    engine::{EngineId, EnginePeerDescriptor},
     event::Duplex,
     peer::{Peer, PeerBuildResult, PeerFactory, PeerId, PeerInfo, PeerRoleId},
 };
@@ -22,7 +22,7 @@ pub enum MeetingEngineEvent {
     /// Notification that a peer has been destroyed.
     PeerDestroyed(PeerId),
     /// Notification that a peer has joined.
-    PeerJoined(PeerId, PeerRoleId),
+    PeerJoined(EngineId, PeerId, PeerRoleId),
     /// Notification that a peer has left.
     PeerLeft(PeerId),
 }
@@ -47,6 +47,7 @@ pub struct Meeting {
     user_event: Duplex<MeetingUserEvent>,
     peers: BTreeMap<PeerId, Vec<Channel>>,
     name: String,
+    peer_kill_event: Duplex<PeerId>,
 }
 
 impl Drop for Meeting {
@@ -84,6 +85,7 @@ impl Meeting {
             user_event,
             peers: Default::default(),
             name,
+            peer_kill_event: Duplex::unbounded(),
         }
     }
 
@@ -95,8 +97,16 @@ impl Meeting {
         &self.factory
     }
 
+    pub fn peers(&self) -> impl Iterator<Item = PeerId> {
+        self.peers.keys().copied()
+    }
+
     pub fn pump(&mut self) -> Result<bool, Box<dyn Error>> {
         let mut result = false;
+        if let Some(event) = self.peer_kill_event.receiver.try_recv() {
+            self.handle_peer_kill(event)?;
+            result = true;
+        }
         if let Some(event) = self.engine_event.receiver.try_recv() {
             self.handle_engine_event(event)?;
             result = true;
@@ -116,6 +126,10 @@ impl Meeting {
 
     pub fn pump_all(&mut self) -> Result<bool, Box<dyn Error>> {
         let mut result = false;
+        if let Some(event) = self.peer_kill_event.receiver.try_recv() {
+            self.handle_peer_kill(event)?;
+            result = true;
+        }
         while let Some(event) = self.engine_event.receiver.try_recv() {
             self.handle_engine_event(event)?;
             result = true;
@@ -133,6 +147,35 @@ impl Meeting {
         Ok(result)
     }
 
+    fn handle_peer_kill(&mut self, peer_id: PeerId) -> Result<(), Box<dyn Error>> {
+        if self.peers.remove(&peer_id).is_some() {
+            tracing::event!(
+                target: "tehuti::meeting",
+                tracing::Level::TRACE,
+                "Meeting {} peer killed: {:?}",
+                self.name,
+                peer_id
+            );
+            self.engine_event
+                .sender
+                .send(MeetingEngineEvent::PeerDestroyed(peer_id))
+                .map_err(|err| format!("Engine event sender error: {err}"))?;
+            self.user_event
+                .sender
+                .send(MeetingUserEvent::PeerRemoved(peer_id))
+                .map_err(|err| format!("User event sender error: {err}"))?;
+        } else {
+            tracing::event!(
+                target: "tehuti::meeting",
+                tracing::Level::WARN,
+                "Meeting {} peer kill request for non-existent peer: {:?}",
+                self.name,
+                peer_id
+            );
+        }
+        Ok(())
+    }
+
     fn handle_engine_event(&mut self, event: MeetingEngineEvent) -> Result<(), Box<dyn Error>> {
         tracing::event!(
             target: "tehuti::meeting",
@@ -142,19 +185,20 @@ impl Meeting {
             event
         );
         match event {
-            MeetingEngineEvent::PeerJoined(peer_id, role_id) => {
+            MeetingEngineEvent::PeerJoined(engine_id, peer_id, role_id) => {
                 let PeerBuildResult {
                     mut peer,
                     channels,
-                    descriptor,
+                    mut descriptor,
                 } = self.factory.create(Peer::new(
                     PeerInfo {
                         peer_id,
                         role_id,
                         remote: true,
                     },
-                    self.user_event.sender.clone(),
+                    self.peer_kill_event.sender.clone(),
                 ))?;
+                descriptor.origin_engine = Some(engine_id);
                 if self.peers.contains_key(&peer.info().peer_id) {
                     unsafe { peer.set_destroy_on_drop(false) };
                     return Err(
@@ -191,13 +235,29 @@ impl Meeting {
                         .sender
                         .send(MeetingEngineEvent::PeerDestroyed(peer_id))
                         .map_err(|err| format!("Engine event sender error: {err}"))?;
+                    self.user_event
+                        .sender
+                        .send(MeetingUserEvent::PeerRemoved(peer_id))
+                        .map_err(|err| format!("User event sender error: {err}"))?;
+                } else {
+                    tracing::event!(
+                        target: "tehuti::meeting",
+                        tracing::Level::WARN,
+                        "Meeting {} peer left event for non-existent peer: {:?}",
+                        self.name,
+                        peer_id
+                    );
                 }
-                self.user_event
-                    .sender
-                    .send(MeetingUserEvent::PeerRemoved(peer_id))
-                    .map_err(|err| format!("User event sender error: {err}"))?;
             }
-            _ => {}
+            _ => {
+                tracing::event!(
+                    target: "tehuti::meeting",
+                    tracing::Level::WARN,
+                    "Meeting {} received unhandled engine event: {:?}",
+                    self.name,
+                    event
+                );
+            }
         }
         Ok(())
     }
@@ -222,7 +282,7 @@ impl Meeting {
                         role_id,
                         remote: false,
                     },
-                    self.user_event.sender.clone(),
+                    self.peer_kill_event.sender.clone(),
                 ))?;
                 if self.peers.contains_key(&peer.info().peer_id) {
                     unsafe { peer.set_destroy_on_drop(false) };
@@ -258,15 +318,31 @@ impl Meeting {
                     );
                     self.engine_event
                         .sender
-                        .send(MeetingEngineEvent::PeerLeft(peer_id))
+                        .send(MeetingEngineEvent::PeerDestroyed(peer_id))
                         .map_err(|err| format!("Engine event sender error: {err}"))?;
                     self.user_event
                         .sender
                         .send(MeetingUserEvent::PeerRemoved(peer_id))
                         .map_err(|err| format!("User event sender error: {err}"))?;
+                } else {
+                    tracing::event!(
+                        target: "tehuti::meeting",
+                        tracing::Level::WARN,
+                        "Meeting {} peer destroy request for non-existent peer: {:?}",
+                        self.name,
+                        peer_id
+                    );
                 }
             }
-            _ => {}
+            _ => {
+                tracing::event!(
+                    target: "tehuti::meeting",
+                    tracing::Level::WARN,
+                    "Meeting {} received unhandled user event: {:?}",
+                    self.name,
+                    event
+                );
+            }
         }
         Ok(())
     }

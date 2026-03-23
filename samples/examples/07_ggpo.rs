@@ -421,9 +421,9 @@ impl Game {
                 if let PlayerCommunication::Local {
                     state_hash_sender, ..
                 } = &player.communication
-                    && let Some(event) = HistoryEvent::collect_history(
+                    && let Some(event) = HistoryEvent::collect_snapshot(
                         &player.state_hash_history,
-                        self.current_tick..=self.current_tick,
+                        self.current_tick,
                     )
                 {
                     state_hash_sender.send(event.into()).ok();

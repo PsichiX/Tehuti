@@ -361,7 +361,12 @@ impl MockMeeting {
                         )) => {
                             outside_engine
                                 .sender
-                                .send(MeetingEngineEvent::PeerJoined(peer_id, peer_role_id))
+                                .send(MeetingEngineEvent::PeerJoined(
+                                    // TODO: Mock engine should be compatible with EngineMeeting.
+                                    EngineId::new(0),
+                                    peer_id,
+                                    peer_role_id,
+                                ))
                                 .map_err(|err| {
                                     format!("Machine outside engine sender error: {err}")
                                 })
