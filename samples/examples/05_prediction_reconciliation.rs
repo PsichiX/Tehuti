@@ -27,7 +27,7 @@ use tehuti_timeline::{
 };
 use tracing_subscriber::{layer::SubscriberExt, registry, util::SubscriberInitExt};
 
-const ADDRESS: &str = "127.0.0.1:8888";
+const ADDRESS: &str = "127.0.0.1:12345";
 const AUTHORITY_CLOCK_CHANNEL: ChannelId = ChannelId::new(10);
 const PLAYER_INPUT_CHANNEL: ChannelId = ChannelId::new(0);
 const PLAYER_STATE_CHANNEL: ChannelId = ChannelId::new(1);
@@ -293,7 +293,7 @@ impl Game {
             } = player
                 && let Some(Dispatch { message, .. }) = input_receiver.last()
             {
-                let div = message.apply_history_divergence(input_history)?;
+                let div = input_history.apply_history_divergence(&message)?;
                 divergence = TimeStamp::possibly_oldest(divergence, div);
             }
         }
@@ -321,7 +321,7 @@ impl Game {
                 }
             };
 
-            if let Some(event) = HistoryEvent::collect_snapshot(history, current_tick) {
+            if let Some(event) = history.collect_snapshot(current_tick) {
                 sender.send(event.into())?;
             }
         }
@@ -378,7 +378,7 @@ impl Game {
                     ..
                 } => {
                     if let Some(Dispatch { message, .. }) = state_receiver.last() {
-                        let div = message.apply_history_divergence(state_history)?;
+                        let div = state_history.apply_history_divergence(&message)?;
                         divergence = TimeStamp::possibly_oldest(divergence, div);
                     }
                 }
@@ -391,7 +391,7 @@ impl Game {
                     ..
                 } => {
                     if let Some(Dispatch { message, .. }) = state_receiver.last() {
-                        let div = message.apply_history_divergence(state_history)?;
+                        let div = state_history.apply_history_divergence(&message)?;
                         if let Some(div) = div {
                             state_history.evolve(div, current_tick, |state| {
                                 let mut state = *state;
@@ -516,9 +516,7 @@ impl Game {
                 } => {
                     input_history.set(current_tick, input);
                     let since = current_tick - CLIENT_SEND_INPUT_WINDOW;
-                    if let Some(event) =
-                        HistoryEvent::collect_history(input_history, since..=current_tick)
-                    {
+                    if let Some(event) = input_history.collect_history(since..=current_tick) {
                         input_sender.send(event.into()).ok();
                     }
                 }

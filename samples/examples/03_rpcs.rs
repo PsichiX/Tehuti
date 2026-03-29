@@ -15,7 +15,7 @@ use tehuti::{
 use tehuti_mock::mock_recv_matching;
 use tehuti_socket::TcpMeetingConfig;
 
-const ADDRESS: &str = "127.0.0.1:8888";
+const ADDRESS: &str = "127.0.0.1:12345";
 const RPC_CHANNEL: ChannelId = ChannelId::new(0);
 
 type TickRpc = Rpc<(), RepCodec<u32>>;

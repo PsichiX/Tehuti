@@ -15,6 +15,7 @@ use tehuti::{
     third_party::{
         time::{Duration, Instant},
         tracing::debug,
+        typid::ID,
     },
 };
 use tehuti_client_server::authority::{Authority, AuthorityUserData};
@@ -22,15 +23,17 @@ use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
 use tehuti_socket::TcpMeetingConfig;
 use tehuti_timeline::{
     clock::{Clock, ClockEvent},
+    command::{Command, CommandHistoryBuffer, CommandHistoryEvent},
     history::{HistoryBuffer, HistoryEvent},
     time::TimeStamp,
 };
 use tracing_subscriber::{layer::SubscriberExt, registry, util::SubscriberInitExt};
 
-const ADDRESS: &str = "127.0.0.1:8888";
+const ADDRESS: &str = "127.0.0.1:12345";
 const AUTHORITY_CLOCK_CHANNEL: ChannelId = ChannelId::new(10);
 const PLAYER_INPUT_CHANNEL: ChannelId = ChannelId::new(0);
 const PLAYER_STATE_CHANNEL: ChannelId = ChannelId::new(1);
+const PLAYER_COMMAND_CHANNEL: ChannelId = ChannelId::new(2);
 const WORLD_SIZE: (i32, i32) = (20, 10);
 const HISTORY_CAPACITY: usize = 16;
 const SERVER_SEND_STATE_INTERVAL: Duration = Duration::from_millis(1000 / 20);
@@ -152,6 +155,7 @@ struct Game {
     added_peers_receiver: Receiver<Peer>,
     removed_peers_receiver: Receiver<PeerId>,
     players: HashMap<PeerId, PlayerRole>,
+    foods: HashMap<ID<Food>, Food>,
     timer: Instant,
 }
 
@@ -181,6 +185,7 @@ impl Game {
             added_peers_receiver,
             removed_peers_receiver,
             players: Default::default(),
+            foods: Default::default(),
             timer: Instant::now(),
         })
     }
@@ -226,6 +231,7 @@ impl Game {
             player
                 .state_mut()
                 .ensure_timestamp(current_tick, Default::default);
+            player.commands_mut().ensure_timestamp(current_tick)?;
         }
 
         Ok(())
@@ -239,6 +245,7 @@ impl Game {
         }
 
         self.server_send_input()?;
+        self.server_send_commands()?;
 
         if self.timer.elapsed() >= SERVER_SEND_STATE_INTERVAL {
             self.timer = Instant::now();
@@ -266,7 +273,7 @@ impl Game {
                 input_history,
                 ..
             } = player
-                && let Some(event) = HistoryEvent::collect_snapshot(input_history, current_tick)
+                && let Some(event) = input_history.collect_snapshot(current_tick)
             {
                 input_sender.send(event.into())?;
             }
@@ -295,7 +302,35 @@ impl Game {
                 }
             };
 
-            if let Some(event) = HistoryEvent::collect_snapshot(history, current_tick) {
+            if let Some(event) = history.collect_snapshot(current_tick) {
+                sender.send(event.into())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn server_send_commands(&self) -> Result<(), Box<dyn Error>> {
+        let current_tick = self.authority.extension().unwrap().clock.tick();
+
+        for player in self.players.values() {
+            let (sender, history) = match player {
+                PlayerRole::ServerLocal {
+                    command_sender,
+                    command_history,
+                    ..
+                } => (command_sender, command_history),
+                PlayerRole::ServerRemote {
+                    command_sender,
+                    command_history,
+                    ..
+                } => (command_sender, command_history),
+                _ => {
+                    continue;
+                }
+            };
+
+            if let Some(event) = history.collect_snapshot(current_tick) {
                 sender.send(event.into())?;
             }
         }
@@ -306,7 +341,10 @@ impl Game {
     fn maintain_client(&mut self, delta_time: f32) -> Result<(), Box<dyn Error>> {
         let divergence = TimeStamp::possibly_oldest(
             self.find_input_divergence()?,
-            self.client_find_state_divergence()?,
+            TimeStamp::possibly_oldest(
+                self.client_find_state_divergence()?,
+                self.client_find_command_divergence()?,
+            ),
         );
 
         if let Some(divergence) = divergence {
@@ -341,7 +379,7 @@ impl Game {
                     ..
                 } => {
                     if let Some(Dispatch { message, .. }) = state_receiver.last() {
-                        let div = message.apply_history_divergence(state_history)?;
+                        let div = state_history.apply_history_divergence(&message)?;
                         divergence = TimeStamp::possibly_oldest(divergence, div);
                     }
                 }
@@ -351,10 +389,37 @@ impl Game {
                     ..
                 } => {
                     if let Some(Dispatch { message, .. }) = state_receiver.last() {
-                        message.apply_history(state_history)?;
+                        state_history.apply_history(&message)?;
                     }
                 }
                 _ => {}
+            }
+        }
+
+        Ok(divergence)
+    }
+
+    fn client_find_command_divergence(&mut self) -> Result<Option<TimeStamp>, Box<dyn Error>> {
+        let mut divergence = None;
+
+        for player in self.players.values_mut() {
+            let (receiver, history) = match player {
+                PlayerRole::ClientLocal {
+                    command_receiver,
+                    command_history,
+                    ..
+                } => (command_receiver, command_history),
+                PlayerRole::ClientRemote {
+                    command_receiver,
+                    command_history,
+                    ..
+                } => (command_receiver, command_history),
+                _ => continue,
+            };
+
+            if let Some(Dispatch { message, .. }) = receiver.last() {
+                let div = history.apply_history_divergence(&message)?;
+                divergence = TimeStamp::possibly_oldest(divergence, div);
             }
         }
 
@@ -382,7 +447,7 @@ impl Game {
             };
 
             if let Some(Dispatch { message, .. }) = input_receiver.last() {
-                let div = message.apply_history_divergence(input_history)?;
+                let div = input_history.apply_history_divergence(&message)?;
                 divergence = TimeStamp::possibly_oldest(divergence, div);
             }
         }
@@ -402,6 +467,10 @@ impl Game {
         for player in self.players.values_mut() {
             player.inputs_mut().time_travel_to(start_tick);
             player.state_mut().time_travel_to(start_tick);
+            player
+                .commands_mut()
+                .undo_range(&mut self.foods, start_tick..=end_tick)?;
+            player.commands_mut().time_travel_to(start_tick)?;
         }
 
         if start_tick < end_tick {
@@ -451,6 +520,26 @@ impl Game {
             state.position_y.0 = state.position_y.0.clamp(0.0, (WORLD_SIZE.1 - 1) as f32);
 
             states.set(current_tick, state);
+
+            let commands = player.commands_mut();
+            if commands.tick_once(current_tick).is_ok() {
+                if input.spawn_food {
+                    commands
+                        .spawn(
+                            current_tick + 1,
+                            SpawnFoodCommand {
+                                id: ID::new(),
+                                food: Food {
+                                    position_x: state.position_x,
+                                    position_y: state.position_y,
+                                },
+                            },
+                        )
+                        .unwrap();
+                }
+
+                commands.do_once(&mut self.foods, current_tick).unwrap();
+            }
         }
 
         self.authority.extension_mut().unwrap().clock.advance(1);
@@ -463,6 +552,7 @@ impl Game {
             right: keys.get(KeyCode::Right).is_down(),
             up: keys.get(KeyCode::Up).is_down(),
             down: keys.get(KeyCode::Down).is_down(),
+            spawn_food: keys.get(KeyCode::Char(' ')).just_pressed(),
         };
 
         if let Some(player) = self.local_player_mut() {
@@ -484,8 +574,7 @@ impl Game {
 
             input_history.set(current_tick, input);
             let since = current_tick - CLIENT_SEND_INPUT_WINDOW;
-            if let Some(event) = HistoryEvent::collect_history(input_history, since..=current_tick)
-            {
+            if let Some(event) = input_history.collect_history(since..=current_tick) {
                 input_sender.send(event.into()).ok();
             }
         }
@@ -507,6 +596,14 @@ impl Game {
         }
 
         let current_tick = self.authority.extension().unwrap().clock.tick();
+
+        for food in self.foods.values() {
+            let (x, y) = (food.position_x.0, food.position_y.0);
+
+            if x >= 0.0 && y >= 0.0 && x < WORLD_SIZE.0 as f32 && y < WORLD_SIZE.1 as f32 {
+                terminal.display([x as u16 + 1, y as u16 + 1], "■");
+            }
+        }
 
         // Draw players as their peer id at current tick position.
         for player in self.players.values() {
@@ -609,6 +706,7 @@ impl Game {
 // sure in case of loosing packets, we still obtain potentially missed history.
 type InputEvent = HistoryEvent<InputSnapshot>;
 type StateEvent = HistoryEvent<StateSnapshot>;
+type CommandEvent = CommandHistoryEvent<SpawnFoodCommand>;
 
 // Inputs snapshot should only contain input down states, from which simulation
 // will deduce detailed changes between consecutive ticks.
@@ -618,6 +716,7 @@ struct InputSnapshot {
     right: bool,
     up: bool,
     down: bool,
+    spawn_food: bool,
 }
 
 // State snapshots should store information required for simulation evolution,
@@ -630,6 +729,32 @@ struct StateSnapshot {
     position_y: RepF32,
     velocity_x: RepF32,
     velocity_y: RepF32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct Food {
+    position_x: RepF32,
+    position_y: RepF32,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+struct SpawnFoodCommand {
+    id: ID<Food>,
+    food: Food,
+}
+
+impl Command for SpawnFoodCommand {
+    type Context = HashMap<ID<Food>, Food>;
+
+    fn on_do(&mut self, context: &mut Self::Context) -> Result<(), Box<dyn Error>> {
+        context.insert(self.id, self.food);
+        Ok(())
+    }
+
+    fn on_undo(&mut self, context: &mut Self::Context) -> Result<(), Box<dyn Error>> {
+        context.remove(&self.id);
+        Ok(())
+    }
 }
 
 // Player role channel rights:
@@ -646,7 +771,7 @@ struct StateSnapshot {
 //   - on server and client local peer can send inputs and remote peer can
 //     receive inputs to apply to history buffer and resimulate game if
 //     divergence is detected.
-// * State (authoritative snapshots / corrections):
+// * State & Commands (authoritative snapshots / corrections):
 //   +----------------------+     +----------------------+
 //   | Server               |     | Client               |
 //   +--------+------+------+     +--------+------+------+
@@ -660,36 +785,44 @@ struct StateSnapshot {
 //     to clients.
 //   - on client, both local and remote peers can receive authoritative snapshots
 //     from server.
-// * On server and client local and remote peers need input and state history
+// * On server and client local and remote peers need state and command history
 //   for full rollback and resimulation capabilities.
 enum PlayerRole {
     ServerLocal {
         info: PeerInfo,
         input_sender: Sender<Dispatch<HistoryEvent<InputSnapshot>>>,
         state_sender: Sender<Dispatch<HistoryEvent<StateSnapshot>>>,
+        command_sender: Sender<Dispatch<CommandHistoryEvent<SpawnFoodCommand>>>,
         input_history: HistoryBuffer<InputSnapshot>,
         state_history: HistoryBuffer<StateSnapshot>,
+        command_history: CommandHistoryBuffer<SpawnFoodCommand>,
     },
     ServerRemote {
         info: PeerInfo,
         input_receiver: Receiver<Dispatch<HistoryEvent<InputSnapshot>>>,
         state_sender: Sender<Dispatch<HistoryEvent<StateSnapshot>>>,
+        command_sender: Sender<Dispatch<CommandHistoryEvent<SpawnFoodCommand>>>,
         input_history: HistoryBuffer<InputSnapshot>,
         state_history: HistoryBuffer<StateSnapshot>,
+        command_history: CommandHistoryBuffer<SpawnFoodCommand>,
     },
     ClientLocal {
         info: PeerInfo,
         input_sender: Sender<Dispatch<HistoryEvent<InputSnapshot>>>,
         state_receiver: Receiver<Dispatch<HistoryEvent<StateSnapshot>>>,
+        command_receiver: Receiver<Dispatch<CommandHistoryEvent<SpawnFoodCommand>>>,
         input_history: HistoryBuffer<InputSnapshot>,
         state_history: HistoryBuffer<StateSnapshot>,
+        command_history: CommandHistoryBuffer<SpawnFoodCommand>,
     },
     ClientRemote {
         info: PeerInfo,
         input_receiver: Receiver<Dispatch<HistoryEvent<InputSnapshot>>>,
         state_receiver: Receiver<Dispatch<HistoryEvent<StateSnapshot>>>,
+        command_receiver: Receiver<Dispatch<CommandHistoryEvent<SpawnFoodCommand>>>,
         input_history: HistoryBuffer<InputSnapshot>,
         state_history: HistoryBuffer<StateSnapshot>,
+        command_history: CommandHistoryBuffer<SpawnFoodCommand>,
     },
 }
 
@@ -738,6 +871,23 @@ impl PlayerRole {
             Self::ClientRemote { state_history, .. } => state_history,
         }
     }
+
+    fn commands_mut(&mut self) -> &mut CommandHistoryBuffer<SpawnFoodCommand> {
+        match self {
+            Self::ServerLocal {
+                command_history, ..
+            } => command_history,
+            Self::ClientLocal {
+                command_history, ..
+            } => command_history,
+            Self::ServerRemote {
+                command_history, ..
+            } => command_history,
+            Self::ClientRemote {
+                command_history, ..
+            } => command_history,
+        }
+    }
 }
 
 impl TypedPeerRole for PlayerRole {
@@ -760,6 +910,11 @@ impl TypedPeer for PlayerRole {
                     PLAYER_STATE_CHANNEL,
                     ChannelMode::Unreliable,
                     None,
+                )
+                .bind_write::<PostcardCodec<CommandEvent>, CommandEvent>(
+                    PLAYER_COMMAND_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
                 ),
             (true, false) => builder
                 .bind_read::<PostcardCodec<InputEvent>, InputEvent>(
@@ -770,6 +925,11 @@ impl TypedPeer for PlayerRole {
                 .bind_write::<PostcardCodec<StateEvent>, StateEvent>(
                     PLAYER_STATE_CHANNEL,
                     ChannelMode::Unreliable,
+                    None,
+                )
+                .bind_write::<PostcardCodec<CommandEvent>, CommandEvent>(
+                    PLAYER_COMMAND_CHANNEL,
+                    ChannelMode::ReliableOrdered,
                     None,
                 ),
             (false, true) => builder
@@ -782,6 +942,11 @@ impl TypedPeer for PlayerRole {
                     PLAYER_STATE_CHANNEL,
                     ChannelMode::Unreliable,
                     None,
+                )
+                .bind_read::<PostcardCodec<CommandEvent>, CommandEvent>(
+                    PLAYER_COMMAND_CHANNEL,
+                    ChannelMode::ReliableOrdered,
+                    None,
                 ),
             (false, false) => builder
                 .bind_read::<PostcardCodec<InputEvent>, InputEvent>(
@@ -792,6 +957,11 @@ impl TypedPeer for PlayerRole {
                 .bind_read::<PostcardCodec<StateEvent>, StateEvent>(
                     PLAYER_STATE_CHANNEL,
                     ChannelMode::Unreliable,
+                    None,
+                )
+                .bind_read::<PostcardCodec<CommandEvent>, CommandEvent>(
+                    PLAYER_COMMAND_CHANNEL,
+                    ChannelMode::ReliableOrdered,
                     None,
                 ),
         })
@@ -806,29 +976,37 @@ impl TypedPeer for PlayerRole {
                 info: *peer.info(),
                 input_sender: peer.write::<InputEvent>(PLAYER_INPUT_CHANNEL)?,
                 state_sender: peer.write::<StateEvent>(PLAYER_STATE_CHANNEL)?,
+                command_sender: peer.write::<CommandEvent>(PLAYER_COMMAND_CHANNEL)?,
                 input_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
                 state_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
+                command_history: CommandHistoryBuffer::with_capacity(HISTORY_CAPACITY),
             }),
             (true, false) => Ok(Self::ServerRemote {
                 info: *peer.info(),
                 input_receiver: peer.read::<InputEvent>(PLAYER_INPUT_CHANNEL)?,
                 state_sender: peer.write::<StateEvent>(PLAYER_STATE_CHANNEL)?,
+                command_sender: peer.write::<CommandEvent>(PLAYER_COMMAND_CHANNEL)?,
                 input_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
                 state_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
+                command_history: CommandHistoryBuffer::with_capacity(HISTORY_CAPACITY),
             }),
             (false, true) => Ok(Self::ClientLocal {
                 info: *peer.info(),
                 input_sender: peer.write::<InputEvent>(PLAYER_INPUT_CHANNEL)?,
                 state_receiver: peer.read::<StateEvent>(PLAYER_STATE_CHANNEL)?,
+                command_receiver: peer.read::<CommandEvent>(PLAYER_COMMAND_CHANNEL)?,
                 input_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
                 state_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
+                command_history: CommandHistoryBuffer::with_capacity(HISTORY_CAPACITY),
             }),
             (false, false) => Ok(Self::ClientRemote {
                 info: *peer.info(),
                 state_receiver: peer.read::<StateEvent>(PLAYER_STATE_CHANNEL)?,
                 input_receiver: peer.read::<InputEvent>(PLAYER_INPUT_CHANNEL)?,
+                command_receiver: peer.read::<CommandEvent>(PLAYER_COMMAND_CHANNEL)?,
                 input_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
                 state_history: HistoryBuffer::with_capacity(HISTORY_CAPACITY),
+                command_history: CommandHistoryBuffer::with_capacity(HISTORY_CAPACITY),
             }),
         }
     }

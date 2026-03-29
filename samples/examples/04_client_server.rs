@@ -20,7 +20,7 @@ use tehuti_diagnostics::{log_buffer::LogBuffer, recorder::Recorder};
 use tehuti_socket::TcpMeetingConfig;
 use tracing_subscriber::{layer::SubscriberExt, registry, util::SubscriberInitExt};
 
-const ADDRESS: &str = "127.0.0.1:8888";
+const ADDRESS: &str = "127.0.0.1:12345";
 const PLAYER_EVENT_CHANNEL: ChannelId = ChannelId::new(0);
 const PLAYER_CHANGE_CHANNEL: ChannelId = ChannelId::new(1);
 const WORLD_SIZE: (i32, i32) = (20, 10);

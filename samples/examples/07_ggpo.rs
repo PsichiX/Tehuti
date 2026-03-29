@@ -28,7 +28,7 @@ use tehuti_timeline::{
 use tracing_subscriber::{layer::SubscriberExt, registry, util::SubscriberInitExt};
 use vek::num_traits::{FromPrimitive, ToPrimitive};
 
-const ADDRESS: &str = "127.0.0.1:8888";
+const ADDRESS: &str = "127.0.0.1:12345";
 const INPUT_STATE_CHANNEL: ChannelId = ChannelId::new(0);
 const STATE_HASH_CHANNEL: ChannelId = ChannelId::new(1);
 const WORLD_SIZE: (i32, i32) = (20, 10);
@@ -249,7 +249,7 @@ impl Game {
             if let PlayerCommunication::Remote { input_receiver, .. } = &player.communication {
                 for Dispatch { message, .. } in input_receiver.iter() {
                     player.confirmed_tick = player.confirmed_tick.max(message.now());
-                    let div = message.apply_history_divergence(&mut player.input_history)?;
+                    let div = player.input_history.apply_history_divergence(&message)?;
                     divergence = TimeStamp::possibly_oldest(divergence, div);
                 }
             }
@@ -276,9 +276,7 @@ impl Game {
         {
             player.input_history.set(input_tick, input);
             let since = input_tick - SEND_INPUT_WINDOW;
-            if let Some(event) =
-                HistoryEvent::collect_history(&player.input_history, since..=input_tick)
-            {
+            if let Some(event) = player.input_history.collect_history(since..=input_tick) {
                 input_sender.send(event.into()).ok();
             }
         }
@@ -421,10 +419,9 @@ impl Game {
                 if let PlayerCommunication::Local {
                     state_hash_sender, ..
                 } = &player.communication
-                    && let Some(event) = HistoryEvent::collect_snapshot(
-                        &player.state_hash_history,
-                        self.current_tick,
-                    )
+                    && let Some(event) = player
+                        .state_hash_history
+                        .collect_snapshot(self.current_tick)
                 {
                     state_hash_sender.send(event.into()).ok();
                 }

@@ -6,9 +6,8 @@ use std::{
     error::Error,
     ops::{Bound, Deref, DerefMut, Index, IndexMut, RangeBounds, RangeInclusive},
 };
-use tehuti::{buffer::Buffer, replication::Replicable};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct HistoryBuffer<T: Clone> {
     capacity: usize,
     buffer: VecDeque<T>,
@@ -41,6 +40,14 @@ impl<T: Clone> HistoryBuffer<T> {
         }
     }
 
+    pub fn without_capacity() -> Self {
+        Self {
+            capacity: usize::MAX,
+            buffer: Default::default(),
+            now: Default::default(),
+        }
+    }
+
     pub fn clone_to(&self, other: &mut Self, range: impl RangeBounds<TimeStamp> + Clone) {
         for (timestamp, value) in self.iter(range) {
             other.set(timestamp, value.clone());
@@ -55,6 +62,28 @@ impl<T: Clone> HistoryBuffer<T> {
         self.capacity = capacity;
         while self.len() > capacity {
             self.buffer.pop_front();
+        }
+    }
+
+    pub fn set_range(&mut self, range: impl RangeBounds<TimeStamp>) {
+        let range_start = match range.start_bound() {
+            Bound::Included(start) => *start,
+            Bound::Excluded(start) => *start + 1,
+            Bound::Unbounded => self.past().unwrap_or_default(),
+        }
+        .max(self.past().unwrap_or_default());
+        let range_end = match range.end_bound() {
+            Bound::Included(end) => *end,
+            Bound::Excluded(end) => *end - 1,
+            Bound::Unbounded => self.now().unwrap_or_default(),
+        }
+        .min(self.now().unwrap_or_default());
+        while range_start > self.past().unwrap_or_default() {
+            self.buffer.pop_front();
+        }
+        while self.now().unwrap_or_default() > range_end {
+            self.buffer.pop_back();
+            self.now -= 1;
         }
     }
 
@@ -252,90 +281,65 @@ impl<T: Clone> HistoryBuffer<T> {
         Ok(())
     }
 
-    pub fn collect_changes(
+    pub fn collect_history(
         &self,
-        buffer: &mut Buffer,
         range: impl RangeBounds<TimeStamp> + Clone,
-        compress_delta: bool,
-    ) -> Result<(), Box<dyn Error>>
+    ) -> Option<HistoryEvent<T>>
     where
-        T: PartialEq + Replicable,
+        T: Clone,
     {
-        let range_start = match range.start_bound() {
-            Bound::Included(start) => *start,
-            Bound::Excluded(start) => *start + 1,
-            Bound::Unbounded => self.past().unwrap_or_default(),
-        }
-        .max(self.past().unwrap_or_default());
-        let range_end = match range.end_bound() {
-            Bound::Included(end) => *end,
-            Bound::Excluded(end) => *end - 1,
-            Bound::Unbounded => self.now().unwrap_or_default(),
-        }
-        .min(self.now);
-        if compress_delta {
-            true.collect_changes(buffer)?;
-            range_start.collect_changes(buffer)?;
-            range_end.collect_changes(buffer)?;
-            let mut prev_value = None;
-            for tick in range_start.ticks()..=range_end.ticks() {
-                let timestamp = TimeStamp::new(tick);
-                let Some(value) = self.get(timestamp) else {
-                    return Err(format!("Missing value for timestamp {}", timestamp.ticks()).into());
-                };
-                if prev_value.is_none() || prev_value.as_ref().unwrap() != value {
-                    true.collect_changes(buffer)?;
-                    value.collect_changes(buffer)?;
-                    prev_value = Some(value.clone());
-                } else {
-                    false.collect_changes(buffer)?;
+        let mut start = None;
+        let snapshots = self
+            .iter(range)
+            .map(|(timestamp, snapshot)| {
+                if start.is_none() {
+                    start = Some(timestamp);
                 }
-            }
-        } else {
-            false.collect_changes(buffer)?;
-            range_start.collect_changes(buffer)?;
-            range_end.collect_changes(buffer)?;
-            for tick in range_start.ticks()..=range_end.ticks() {
-                let timestamp = TimeStamp::new(tick);
-                let Some(value) = self.get(timestamp) else {
-                    return Err(format!("Missing value for timestamp {}", timestamp.ticks()).into());
-                };
-                value.collect_changes(buffer)?;
-            }
+                snapshot.clone()
+            })
+            .collect();
+        Some(HistoryEvent {
+            start: start?,
+            snapshots,
+        })
+    }
+
+    pub fn collect_snapshot(&self, timestamp: TimeStamp) -> Option<HistoryEvent<T>>
+    where
+        T: Clone,
+    {
+        let snapshot = self.get(timestamp)?.clone();
+        Some(HistoryEvent {
+            start: timestamp,
+            snapshots: [snapshot].into_iter().collect(),
+        })
+    }
+
+    pub fn apply_history(&mut self, event: &HistoryEvent<T>) -> Result<(), Box<dyn Error>>
+    where
+        T: Clone,
+    {
+        let mut timestamp = event.start;
+        for snapshot in &event.snapshots {
+            self.set(timestamp, snapshot.clone());
+            timestamp += 1;
         }
         Ok(())
     }
 
-    pub fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>>
+    pub fn apply_history_divergence(
+        &mut self,
+        event: &HistoryEvent<T>,
+    ) -> Result<Option<TimeStamp>, Box<dyn Error>>
     where
-        T: Default + Replicable,
+        T: Clone + PartialEq,
     {
-        let mut compressed = false;
-        compressed.apply_changes(buffer)?;
-        let mut from = TimeStamp::default();
-        from.apply_changes(buffer)?;
-        let mut to = TimeStamp::default();
-        to.apply_changes(buffer)?;
-        if compressed {
-            let mut value = T::default();
-            for tick in from.ticks()..=to.ticks() {
-                let mut changed = false;
-                changed.apply_changes(buffer)?;
-                if changed {
-                    value.apply_changes(buffer)?;
-                }
-                let timestamp = TimeStamp::new(tick);
-                self.set(timestamp, value.clone());
-            }
-        } else {
-            for tick in from.ticks()..=to.ticks() {
-                let mut value = T::default();
-                value.apply_changes(buffer)?;
-                let timestamp = TimeStamp::new(tick);
-                self.set(timestamp, value);
-            }
-        }
-        Ok(())
+        // TODO: optimize!
+        let mut temp = Self::with_capacity(event.snapshots.len());
+        temp.apply_history(event)?;
+        let divergence = self.divergence(&temp);
+        temp.clone_to(self, ..);
+        Ok(divergence)
     }
 
     fn timestamp_to_index(&self, timestamp: TimeStamp) -> Option<usize> {
@@ -368,13 +372,27 @@ impl<T: Clone> IndexMut<TimeStamp> for HistoryBuffer<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryEvent<T> {
     start: TimeStamp,
     snapshots: SmallVec<[T; 4]>,
 }
 
 impl<T> HistoryEvent<T> {
+    pub fn new(start: TimeStamp, snapshots: impl IntoIterator<Item = T>) -> Self {
+        Self {
+            start,
+            snapshots: snapshots.into_iter().collect(),
+        }
+    }
+
+    pub fn single(timestamp: TimeStamp, snapshot: T) -> Self {
+        Self {
+            start: timestamp,
+            snapshots: [snapshot].into_iter().collect(),
+        }
+    }
+
     pub fn now(&self) -> TimeStamp {
         self.start + self.snapshots.len() as u64 - 1
     }
@@ -392,81 +410,6 @@ impl<T> HistoryEvent<T> {
             .iter()
             .enumerate()
             .map(move |(index, snapshot)| (self.start + index as u64, snapshot))
-    }
-
-    pub fn new(start: TimeStamp, snapshots: impl IntoIterator<Item = T>) -> Self {
-        Self {
-            start,
-            snapshots: snapshots.into_iter().collect(),
-        }
-    }
-
-    pub fn single(timestamp: TimeStamp, snapshot: T) -> Self {
-        Self {
-            start: timestamp,
-            snapshots: [snapshot].into_iter().collect(),
-        }
-    }
-
-    pub fn collect_history(
-        buffer: &HistoryBuffer<T>,
-        range: impl RangeBounds<TimeStamp> + Clone,
-    ) -> Option<Self>
-    where
-        T: Clone,
-    {
-        let mut start = None;
-        let snapshots = buffer
-            .iter(range)
-            .map(|(timestamp, snapshot)| {
-                if start.is_none() {
-                    start = Some(timestamp);
-                }
-                snapshot.clone()
-            })
-            .collect();
-        Some(Self {
-            start: start?,
-            snapshots,
-        })
-    }
-
-    pub fn collect_snapshot(buffer: &HistoryBuffer<T>, timestamp: TimeStamp) -> Option<Self>
-    where
-        T: Clone,
-    {
-        let snapshot = buffer.get(timestamp)?.clone();
-        Some(Self {
-            start: timestamp,
-            snapshots: [snapshot].into_iter().collect(),
-        })
-    }
-
-    pub fn apply_history(&self, buffer: &mut HistoryBuffer<T>) -> Result<(), Box<dyn Error>>
-    where
-        T: Clone,
-    {
-        let mut timestamp = self.start;
-        for snapshot in &self.snapshots {
-            buffer.set(timestamp, snapshot.clone());
-            timestamp += 1;
-        }
-        Ok(())
-    }
-
-    pub fn apply_history_divergence(
-        &self,
-        buffer: &mut HistoryBuffer<T>,
-    ) -> Result<Option<TimeStamp>, Box<dyn Error>>
-    where
-        T: Clone + PartialEq,
-    {
-        // TODO: optimize!
-        let mut temp = HistoryBuffer::<T>::with_capacity(self.snapshots.capacity());
-        self.apply_history(&mut temp)?;
-        let divergence = buffer.divergence(&temp);
-        temp.clone_to(buffer, ..);
-        Ok(divergence)
     }
 }
 
@@ -513,20 +456,6 @@ mod tests {
     struct Input {
         run: bool,
         jump: bool,
-    }
-
-    impl Replicable for Input {
-        fn collect_changes(&self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
-            self.run.collect_changes(buffer)?;
-            self.jump.collect_changes(buffer)?;
-            Ok(())
-        }
-
-        fn apply_changes(&mut self, buffer: &mut Buffer) -> Result<(), Box<dyn Error>> {
-            self.run.apply_changes(buffer)?;
-            self.jump.apply_changes(buffer)?;
-            Ok(())
-        }
     }
 
     #[test]
@@ -643,6 +572,64 @@ mod tests {
             buffer.iter(..).collect::<Vec<_>>(),
             vec![(TimeStamp::new(3), &2)]
         );
+    }
+
+    #[test]
+    fn test_history_buffer_size() {
+        let mut buffer = HistoryBuffer::without_capacity();
+        for index in 0..10 {
+            buffer.set(TimeStamp::new(index), index);
+        }
+        assert_eq!(buffer.len(), 10);
+
+        buffer.set_range(TimeStamp::new(0)..);
+        assert_eq!(buffer.len(), 10);
+
+        buffer.set_range(..TimeStamp::new(10));
+        assert_eq!(buffer.len(), 10);
+
+        buffer.set_range(..=TimeStamp::new(10));
+        assert_eq!(buffer.len(), 10);
+
+        buffer.set_range(..);
+        assert_eq!(buffer.len(), 10);
+
+        buffer.set_range(TimeStamp::new(3)..);
+        assert_eq!(buffer.len(), 7);
+        assert_eq!(buffer.now(), Some(TimeStamp::new(9)));
+        assert_eq!(buffer.past(), Some(TimeStamp::new(3)));
+
+        buffer.set_range(..TimeStamp::new(7));
+        assert_eq!(buffer.len(), 4);
+        assert_eq!(buffer.now(), Some(TimeStamp::new(6)));
+        assert_eq!(buffer.past(), Some(TimeStamp::new(3)));
+
+        assert_eq!(
+            buffer.iter(..).collect::<Vec<_>>(),
+            vec![
+                (TimeStamp::new(3), &3),
+                (TimeStamp::new(4), &4),
+                (TimeStamp::new(5), &5),
+                (TimeStamp::new(6), &6)
+            ]
+        );
+
+        buffer.set(TimeStamp::new(2), 2);
+        buffer.set(TimeStamp::new(7), 7);
+        assert_eq!(
+            buffer.iter(..).collect::<Vec<_>>(),
+            vec![
+                (TimeStamp::new(2), &2),
+                (TimeStamp::new(3), &3),
+                (TimeStamp::new(4), &4),
+                (TimeStamp::new(5), &5),
+                (TimeStamp::new(6), &6),
+                (TimeStamp::new(7), &7)
+            ]
+        );
+        assert_eq!(buffer.len(), 6);
+        assert_eq!(buffer.now(), Some(TimeStamp::new(7)));
+        assert_eq!(buffer.past(), Some(TimeStamp::new(2)));
     }
 
     #[test]
@@ -813,77 +800,28 @@ mod tests {
     }
 
     #[test]
-    fn test_history_buffer_replication() {
-        let mut a = HistoryBuffer::with_capacity(4);
-        a.set(
-            TimeStamp::new(0),
-            Input {
-                run: true,
-                jump: true,
-            },
-        );
-        a.set(
-            TimeStamp::new(1),
-            Input {
-                run: true,
-                jump: true,
-            },
-        );
-        a.set(
-            TimeStamp::new(2),
-            Input {
-                run: false,
-                jump: false,
-            },
-        );
-
-        let mut buffer = Buffer::new(Default::default());
-        a.collect_changes(&mut buffer, .., true).unwrap();
-        let buffer = buffer.into_inner();
-        assert_eq!(buffer.len(), 10);
-
-        let mut b = HistoryBuffer::with_capacity(4);
-        let mut buffer = Buffer::new(buffer);
-        b.apply_changes(&mut buffer).unwrap();
-
-        assert_eq!(a, b);
-
-        let mut buffer = Buffer::new(Default::default());
-        a.collect_changes(&mut buffer, .., false).unwrap();
-        let buffer = buffer.into_inner();
-        assert_eq!(buffer.len(), 9);
-
-        let mut b = HistoryBuffer::with_capacity(4);
-        let mut buffer = Buffer::new(buffer);
-        b.apply_changes(&mut buffer).unwrap();
-
-        assert_eq!(a, b);
-    }
-
-    #[test]
     fn test_history_event() {
         let mut buffer = HistoryBuffer::with_capacity(4);
         buffer.set(TimeStamp::new(0), 0);
         buffer.set(TimeStamp::new(1), 1);
         buffer.set(TimeStamp::new(2), 2);
 
-        let event = HistoryEvent::collect_history(&buffer, ..).unwrap();
+        let event = buffer.collect_history(..).unwrap();
         assert_eq!(event.start, TimeStamp::new(0));
         assert_eq!(event.snapshots, SmallVec::from_buf([0, 1, 2]));
 
         let mut new_buffer = HistoryBuffer::with_capacity(4);
-        event.apply_history(&mut new_buffer).unwrap();
+        new_buffer.apply_history(&event).unwrap();
         assert_eq!(buffer, new_buffer);
 
         let mut temp = HistoryBuffer::with_capacity(4);
         temp.set(TimeStamp::new(1), 10);
         temp.set(TimeStamp::new(2), 20);
-        let divergence = event.apply_history_divergence(&mut temp).unwrap().unwrap();
+        let divergence = temp.apply_history_divergence(&event).unwrap().unwrap();
         assert_eq!(divergence, TimeStamp::new(1));
 
-        // TODO: should this scenario really give no divergence? rethink that.
         let mut temp = HistoryBuffer::with_capacity(4);
         temp.set(TimeStamp::new(10), 10);
-        assert!(event.apply_history_divergence(&mut temp).unwrap().is_none());
+        assert!(temp.apply_history_divergence(&event).unwrap().is_none());
     }
 }
