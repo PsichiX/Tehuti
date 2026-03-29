@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(c.into_inner(), 35);
         assert_eq!(c.to_string(), "3.5");
 
-        let c = fixed!(3: 3, 005);
+        let c = fixed!(3: 3, 5);
         assert_eq!(c.into_inner(), 3005);
         assert_eq!(c.to_string(), "3.005");
     }
