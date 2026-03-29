@@ -7,6 +7,7 @@ use tehuti::{
     channel::{ChannelId, ChannelMode, Dispatch},
     codec::postcard::PostcardCodec,
     event::{Receiver, Sender},
+    fixed::Fixed,
     hash,
     meeting::{MeetingInterface, MeetingUserEvent},
     peer::{
@@ -14,7 +15,6 @@ use tehuti::{
         TypedPeerRole,
     },
     third_party::{
-        rust_decimal::Decimal,
         time::{Duration, Instant},
         tracing::debug,
     },
@@ -26,7 +26,8 @@ use tehuti_timeline::{
     time::TimeStamp,
 };
 use tracing_subscriber::{layer::SubscriberExt, registry, util::SubscriberInitExt};
-use vek::num_traits::{FromPrimitive, ToPrimitive};
+
+type Number = Fixed<6>;
 
 const ADDRESS: &str = "127.0.0.1:12345";
 const INPUT_STATE_CHANNEL: ChannelId = ChannelId::new(0);
@@ -39,7 +40,6 @@ const INPUT_DELAY_TICKS: u64 = 3;
 const MAX_PREDICTION_TICKS: u64 = 6;
 const DELTA_TIME: Duration = Duration::from_millis(1000 / 30);
 const SPEED: i64 = 5;
-const DECIMAL_PRECISION: u32 = 6;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Setup diagnostics.
@@ -115,10 +115,10 @@ fn app(
         player.state_history.set(
             game.current_tick,
             StateSnapshot {
-                position_x: i64_to_decimal(game.rng.random_range(2..WORLD_SIZE.0 - 2) as i64),
-                position_y: i64_to_decimal(game.rng.random_range(2..WORLD_SIZE.1 - 2) as i64),
-                velocity_x: i64_to_decimal(0),
-                velocity_y: i64_to_decimal(0),
+                position_x: Number::from_i64(game.rng.random_range(2..WORLD_SIZE.0 - 2) as i64),
+                position_y: Number::from_i64(game.rng.random_range(2..WORLD_SIZE.1 - 2) as i64),
+                velocity_x: Number::from_i64(0),
+                velocity_y: Number::from_i64(0),
             },
         );
     }
@@ -336,24 +336,26 @@ impl Game {
             let state = player.state_history.get_mut(self.current_tick).unwrap();
 
             state.velocity_x = match (input.left, input.right) {
-                (true, false) => i64_to_decimal(-SPEED),
-                (false, true) => i64_to_decimal(SPEED),
-                _ => i64_to_decimal(0),
+                (true, false) => Number::from_i64(-SPEED),
+                (false, true) => Number::from_i64(SPEED),
+                _ => Number::from_i64(0),
             };
             state.velocity_y = match (input.up, input.down) {
-                (true, false) => i64_to_decimal(-SPEED),
-                (false, true) => i64_to_decimal(SPEED),
-                _ => i64_to_decimal(0),
+                (true, false) => Number::from_i64(-SPEED),
+                (false, true) => Number::from_i64(SPEED),
+                _ => Number::from_i64(0),
             };
 
             state.position_x += state.velocity_x * delta_time;
             state.position_y += state.velocity_y * delta_time;
-            state.position_x = state
-                .position_x
-                .clamp(i64_to_decimal(0), i64_to_decimal(WORLD_SIZE.0 as i64 - 1));
-            state.position_y = state
-                .position_y
-                .clamp(i64_to_decimal(0), i64_to_decimal(WORLD_SIZE.1 as i64 - 1));
+            state.position_x = state.position_x.clamp(
+                Number::from_i64(0),
+                Number::from_i64(WORLD_SIZE.0 as i64 - 1),
+            );
+            state.position_y = state.position_y.clamp(
+                Number::from_i64(0),
+                Number::from_i64(WORLD_SIZE.1 as i64 - 1),
+            );
         }
 
         self.current_tick += 1;
@@ -475,10 +477,7 @@ impl Game {
                 .get_extrapolated(self.current_tick)
                 .copied()
                 .unwrap_or_default();
-            let (x, y) = (
-                state.position_x.to_i32().unwrap_or_default(),
-                state.position_y.to_i32().unwrap_or_default(),
-            );
+            let (x, y) = (state.position_x.into_i32(), state.position_y.into_i32());
 
             if x >= 0 && y >= 0 && x < WORLD_SIZE.0 && y < WORLD_SIZE.1 {
                 terminal.display(
@@ -563,10 +562,10 @@ struct InputSnapshot {
 // For our game we force all decimals to have specific precision.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize, Hash)]
 struct StateSnapshot {
-    position_x: Decimal,
-    position_y: Decimal,
-    velocity_x: Decimal,
-    velocity_y: Decimal,
+    position_x: Number,
+    position_y: Number,
+    velocity_x: Number,
+    velocity_y: Number,
 }
 
 // Channels used for peer communication. Local player can send input and state
@@ -653,17 +652,8 @@ impl TypedPeer for PlayerRole {
     }
 }
 
-fn duration_to_decimal(value: Duration) -> Decimal {
-    let mut result = Decimal::from_u128(value.as_micros()).unwrap_or_default()
-        / Decimal::from_u64(1_000_000).unwrap();
-    result.rescale(DECIMAL_PRECISION);
-    result
-}
-
-fn i64_to_decimal(value: i64) -> Decimal {
-    let mut result = Decimal::from_i64(value).unwrap_or_default();
-    result.rescale(DECIMAL_PRECISION);
-    result
+fn duration_to_decimal(value: Duration) -> Number {
+    Number::from_i128(value.as_micros() as i128) / Number::from_i64(1_000_000)
 }
 
 #[cfg(test)]
@@ -674,14 +664,14 @@ mod tests {
     fn test_duration_to_decimal() {
         let duration = Duration::new(1, 500_000_000);
         let decimal = duration_to_decimal(duration);
-        assert_eq!(decimal, Decimal::from_str_exact("1.500000").unwrap());
+        assert_eq!(decimal, "1.500000".parse::<Number>().unwrap());
 
         let duration = Duration::from_millis(16);
         let decimal = duration_to_decimal(duration);
-        assert_eq!(decimal, Decimal::from_str_exact("0.016000").unwrap());
+        assert_eq!(decimal, "0.016000".parse::<Number>().unwrap());
 
         let duration = Duration::from_millis(33);
         let decimal = duration_to_decimal(duration);
-        assert_eq!(decimal, Decimal::from_str_exact("0.033000").unwrap());
+        assert_eq!(decimal, "0.033000".parse::<Number>().unwrap());
     }
 }
